@@ -1,7 +1,7 @@
 {
   "name": "claude-desktop",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Claude Desktop - AI assistant with native capabilities",
   "author": {
     "name": "pretend1111",
