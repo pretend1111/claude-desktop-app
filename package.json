@@ -1,7 +1,7 @@
 {
   "name": "claude-desktop",
   "private": true,
-  "version": "1.4.0",
+  "version": "1.4.2",
   "description": "Claude Desktop - AI assistant with native capabilities",
   "author": {
     "name": "pretend1111",
@@ -74,7 +74,11 @@
         "to": "engine/.env"
       }
     ],
-    "publish": null,
+    "publish": {
+      "provider": "github",
+      "owner": "pretend1111",
+      "repo": "claude-desktop-app"
+    },
     "win": {
       "target": [
         "nsis"
