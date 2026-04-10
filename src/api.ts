@@ -466,10 +466,13 @@ export async function getArtifactContent(filePath: string) {
   return res.json();
 }
 
-export async function createConversation(title?: string, model?: string) {
+export async function createConversation(title?: string, model?: string, extras?: { research_mode?: boolean }) {
   const body: any = { model };
   if (title !== undefined) {
     body.title = title;
+  }
+  if (extras?.research_mode !== undefined) {
+    body.research_mode = extras.research_mode;
   }
   const res = await request('/conversations', {
     method: 'POST',
@@ -750,6 +753,14 @@ export function reconnectStream(
             if (parsed.type === 'compact_boundary' && onSystem) {
               onSystem('compact_boundary', '', parsed);
             }
+            // Research mode events on reconnect path
+            if (parsed.type && parsed.type.startsWith('research_') && onSystem) {
+              onSystem(parsed.type, '', parsed);
+              if (parsed.type === 'research_report_delta' && parsed.text) {
+                fullText += parsed.text;
+                onDelta(parsed.text, fullText);
+              }
+            }
             if (parsed.type === 'message_stop') {
               if (fullText) { onDone(fullText); return; }
             }
@@ -940,6 +951,48 @@ export async function disconnectGithub() {
 
 export async function getGithubRepos(page = 1) {
   const res = await fetch(`${API_BASE}/github/repos?page=${page}`);
+  return res.json();
+}
+
+export async function getGithubTree(owner: string, repo: string, ref = '') {
+  const qs = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+  const res = await fetch(`${API_BASE}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tree${qs}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to fetch tree' }));
+    throw new Error(err.error || 'Failed to fetch tree');
+  }
+  return res.json();
+}
+
+export async function getGithubContents(owner: string, repo: string, path = '', ref = '') {
+  const params = new URLSearchParams();
+  if (path) params.set('path', path);
+  if (ref) params.set('ref', ref);
+  const qs = params.toString();
+  const url = `${API_BASE}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents${qs ? '?' + qs : ''}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to fetch contents' }));
+    throw new Error(err.error || 'Failed to fetch contents');
+  }
+  return res.json();
+}
+
+export async function materializeGithub(
+  conversationId: string,
+  repoFullName: string,
+  ref: string,
+  selections: Array<{ path: string; isFolder: boolean }>
+): Promise<{ ok: boolean; repoFullName: string; ref: string; rootDir: string; fileCount: number; skipped: number }> {
+  const res = await fetch(`${API_BASE}/github/materialize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ conversationId, repoFullName, ref, selections }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Materialize failed' }));
+    throw new Error(err.error || 'Materialize failed');
+  }
   return res.json();
 }
 
@@ -1310,6 +1363,18 @@ export async function sendMessage(
           }
           if (parsed.type === 'tool_use_done' && onToolUse) {
             onToolUse({ type: 'done', tool_use_id: parsed.tool_use_id, content: parsed.content, is_error: parsed.is_error });
+          }
+
+          // Research mode events — forward as system events for MainContent to handle
+          if (parsed.type && parsed.type.startsWith('research_') && onSystem) {
+            onSystem(parsed.type, '', parsed);
+            // research_report_delta also feeds into the streaming text so the
+            // final report appears as the assistant message body
+            if (parsed.type === 'research_report_delta' && parsed.text) {
+              fullText += parsed.text;
+              onDelta(parsed.text, fullText);
+            }
+            continue;
           }
 
           // Track text offset where tool work ends and final response begins

@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Loader2 } from 'lucide-react';
+import { X, Loader2, Github } from 'lucide-react';
 
 export interface PendingFile {
   id: string;
@@ -14,6 +14,9 @@ export interface PendingFile {
   error?: string;
   previewUrl?: string;
   lineCount?: number;
+  source?: 'github';
+  ghRepo?: string;
+  ghRef?: string;
 }
 
 interface FileUploadPreviewProps {
@@ -56,6 +59,7 @@ const FileUploadPreview: React.FC<FileUploadPreviewProps> = ({ files, onRemove }
       <div className="flex flex-nowrap gap-3 px-4 pt-3 pb-2 overflow-x-auto overflow-y-hidden custom-scrollbar-horizontal">
         {files.map((f) => {
           const isImage = !!f.previewUrl && f.mimeType.startsWith('image/');
+          const isGithub = f.source === 'github';
           const ext = f.fileName.split('.').pop()?.toUpperCase() || '?';
           const shortError = f.error ? (f.error.length > 26 ? `${f.error.slice(0, 26)}...` : f.error) : '上传失败';
 
@@ -66,7 +70,31 @@ const FileUploadPreview: React.FC<FileUploadPreviewProps> = ({ files, onRemove }
               isImage ? '' : 'bg-white dark:bg-claude-input p-3 flex flex-col justify-between'
             }`}
           >
-            {isImage && f.previewUrl ? (
+            {isGithub ? (
+              <>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-claude-text leading-tight break-words line-clamp-2" title={f.ghRepo || f.fileName}>
+                    {f.ghRepo || f.fileName}
+                  </div>
+                  <div className="text-[11px] text-claude-textSecondary mt-1">
+                    {f.status === 'uploading' ? (
+                      <span className="flex items-center gap-1">
+                        <Loader2 size={10} className="animate-spin" />
+                        {f.progress}%
+                      </span>
+                    ) : f.status === 'error' ? (
+                      <span className="text-red-500" title={f.error}>{shortError}</span>
+                    ) : (
+                      f.ghRef || 'main'
+                    )}
+                  </div>
+                </div>
+                <div className="self-start flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium border border-gray-200 dark:border-[#5B5B56] bg-gray-50 dark:bg-claude-input rounded text-claude-textSecondary uppercase">
+                  <Github size={10} />
+                  GITHUB
+                </div>
+              </>
+            ) : isImage && f.previewUrl ? (
               <>
                 <img
                   src={f.previewUrl}

@@ -24,6 +24,15 @@ export const IconPlus = ({ size = 20, className = "" }: { size?: number, classNa
   </svg>
 );
 
+// Research icon - magnifying glass with zigzag trend line inside
+export const IconResearch = ({ size = 20, className = "" }: { size?: number, className?: string }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <circle cx="10.5" cy="10.5" r="7.5" />
+    <line x1="21" y1="21" x2="16" y2="16" />
+    <polyline points="6.5 12 9 9 11 11 14.5 7.5" />
+  </svg>
+);
+
 // Chats
 export const IconChatBubble = ({ size = 20, className = "" }: { size?: number, className?: string }) => (
   <img src={chatsImg} width={size} height={size} className={className} alt="Chats" />

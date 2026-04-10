@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FileText, File, X, Code2, Download, FolderOpen } from 'lucide-react';
+import { FileText, File, X, Code2, Download, FolderOpen, Github } from 'lucide-react';
 import { getAttachmentUrl } from '../api';
 
 interface Attachment {
@@ -9,6 +9,9 @@ interface Attachment {
   mime_type: string;
   file_size?: number;
   line_count?: number;
+  source?: string;
+  gh_repo?: string;
+  gh_ref?: string;
 }
 
 import { DocumentInfo } from './DocumentCard';
@@ -65,6 +68,31 @@ const AttachmentCard: React.FC<{ attachment: Attachment; onClick: () => void }> 
   const [loading, setLoading] = useState(true);
 
   const isImage = attachment.file_type === 'image' || (attachment.mime_type?.startsWith('image/') ?? false);
+  const isGithub = attachment.source === 'github' || attachment.file_type === 'github';
+
+  if (isGithub) {
+    const repo = attachment.gh_repo || attachment.file_name || 'github';
+    const ref = attachment.gh_ref || 'main';
+    return (
+      <div
+        className="relative w-28 h-28 rounded-xl border border-gray-200 dark:border-[#5B5B56] bg-white dark:bg-claude-input p-3 flex flex-col justify-between overflow-hidden shadow-sm"
+        title={repo}
+      >
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium text-claude-text leading-tight break-words line-clamp-2">
+            {repo}
+          </div>
+          <div className="text-[11px] text-claude-textSecondary mt-1">
+            {ref}
+          </div>
+        </div>
+        <div className="self-start flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium border border-gray-200 dark:border-[#5B5B56] bg-gray-50 dark:bg-claude-input rounded text-claude-textSecondary uppercase">
+          <Github size={10} />
+          GITHUB
+        </div>
+      </div>
+    );
+  }
 
   useEffect(() => {
     if (isImage) {

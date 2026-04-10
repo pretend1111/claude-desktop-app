@@ -1,13 +1,15 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { ChevronDown, FileText, ArrowUp, RotateCcw, Pencil, Copy, Check, Paperclip, ListCollapse, Globe, Clock, Info } from 'lucide-react';
+import { ChevronDown, FileText, ArrowUp, RotateCcw, Pencil, Copy, Check, Paperclip, ListCollapse, Globe, Clock, Info, Github, Plus, X, Loader2 } from 'lucide-react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { IconPlus, IconVoice, IconPencil } from './Icons';
+import { IconPlus, IconVoice, IconPencil, IconProjects, IconResearch } from './Icons';
 import ClaudeLogo from './ClaudeLogo';
-import { getConversation, sendMessage, createConversation, getUser, updateConversation, deleteMessagesFrom, deleteMessagesTail, uploadFile, deleteAttachment, compactConversation, answerUserQuestion, getUserUsage, getAttachmentUrl, getGenerationStatus, stopGeneration, getContextSize, getUserModels, getStreamStatus, reconnectStream, getProviderModels, getSkills, warmEngine } from '../api';
+import { getConversation, sendMessage, createConversation, getUser, updateConversation, deleteMessagesFrom, deleteMessagesTail, uploadFile, deleteAttachment, compactConversation, answerUserQuestion, getUserUsage, getAttachmentUrl, getGenerationStatus, stopGeneration, getContextSize, getUserModels, getStreamStatus, reconnectStream, getProviderModels, getSkills, warmEngine, getProjects, createProject, Project, materializeGithub } from '../api';
 import { addStreaming, removeStreaming, isStreaming } from '../streamingState';
 import MarkdownRenderer from './MarkdownRenderer';
+import ResearchPanel from './ResearchPanel';
 import ModelSelector, { SelectableModel } from './ModelSelector';
 import FileUploadPreview, { PendingFile } from './FileUploadPreview';
+import AddFromGithubModal, { GithubAddPayload } from './AddFromGithubModal';
 import MessageAttachments from './MessageAttachments';
 import DocumentCard, { DocumentInfo } from './DocumentCard';
 import { copyToClipboard } from '../utils/clipboard';
@@ -290,6 +292,79 @@ function parseInlineArtifactDisplay(content: any): { cleanedContent: string; dra
       done: true,
     },
   };
+}
+
+// Apply a research_* SSE event to the last assistant message in a messages array.
+// Returns a new messages array (mutates a clone of the last message).
+function applyResearchEvent(prev: any[], event: string, data: any): any[] {
+  const newMsgs = [...prev];
+  const lastIdx = newMsgs.length - 1;
+  const lastMsg = newMsgs[lastIdx];
+  if (!lastMsg || lastMsg.role !== 'assistant') return prev;
+  const research = { ...(lastMsg.research || { sub_agents: [], sources: [], phase: null, plan: null, report: null, completed: false }) };
+  research.sub_agents = [...(research.sub_agents || [])];
+  research.sources = [...(research.sources || [])];
+  switch (event) {
+    case 'research_phase':
+      research.phase = data.phase;
+      research.phase_label = data.label;
+      break;
+    case 'research_plan':
+      research.plan = { title: data.title, sub_questions: data.sub_questions };
+      break;
+    case 'research_subagent_started': {
+      const exists = research.sub_agents.find((a: any) => a.id === data.sub_agent_id);
+      if (!exists) {
+        research.sub_agents.push({
+          id: data.sub_agent_id,
+          index: data.index,
+          sub_question: data.sub_question,
+          status: 'running',
+          sources: [],
+          findings: '',
+        });
+      }
+      break;
+    }
+    case 'research_source': {
+      const sub = research.sub_agents.find((a: any) => a.id === data.sub_agent_id);
+      if (sub) {
+        sub.sources = [...sub.sources, data.source];
+      }
+      // Global dedupe
+      const exists = research.sources.find((s: any) => s.url === data.source.url);
+      if (!exists) research.sources.push(data.source);
+      break;
+    }
+    case 'research_finding': {
+      const sub = research.sub_agents.find((a: any) => a.id === data.sub_agent_id);
+      if (sub) {
+        sub.findings = data.markdown || '';
+      }
+      break;
+    }
+    case 'research_subagent_done': {
+      const sub = research.sub_agents.find((a: any) => a.id === data.sub_agent_id);
+      if (sub) {
+        sub.status = data.error ? 'error' : 'done';
+        if (data.error) sub.error = data.error;
+      }
+      break;
+    }
+    case 'research_report':
+      research.report = data.markdown;
+      break;
+    case 'research_done':
+      research.completed = true;
+      research.duration_ms = data.duration_ms;
+      break;
+    case 'research_error':
+      research.error = data.error;
+      research.completed = true;
+      break;
+  }
+  newMsgs[lastIdx] = { ...lastMsg, research };
+  return newMsgs;
 }
 
 function sanitizeInlineArtifactMessage(message: any) {
@@ -655,6 +730,31 @@ const MessageList = React.memo<MessageListProps>(({
                     </div>
                   )}
                 </div>
+              )}
+              {/* Research badge */}
+              {msg.research && (
+                <button
+                  onClick={() => setOpenedResearchMsgId(msg.id)}
+                  className="mb-3 inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-[#DBEAFE] dark:bg-[#1E3A5F] hover:bg-[#BFDBFE] dark:hover:bg-[#2A4A75] transition-colors"
+                >
+                  {msg.research.completed ? (
+                    <IconResearch size={16} className="text-[#2E7CF6]" />
+                  ) : (
+                    <Loader2 size={16} className="text-[#2E7CF6] animate-spin" />
+                  )}
+                  <div className="text-left">
+                    <div className="text-[12.5px] font-medium text-[#2E7CF6] leading-tight">
+                      {msg.research.completed
+                        ? `Research complete · ${(msg.research.sources || []).length} sources`
+                        : msg.research.phase_label || 'Researching...'}
+                    </div>
+                    {msg.research.plan?.title && (
+                      <div className="text-[11px] text-[#2E7CF6]/70 leading-tight mt-0.5 truncate max-w-[400px]">
+                        {msg.research.plan.title}
+                      </div>
+                    )}
+                  </div>
+                </button>
               )}
               {/* Tool calls display */}
               {msg.toolCalls && msg.toolCalls.length > 0 && (() => {
@@ -1102,14 +1202,33 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
+  const [researchMode, setResearchMode] = useState(false);
+  const [openedResearchMsgId, setOpenedResearchMsgId] = useState<string | null>(null);
+  const toggleResearchMode = useCallback(async () => {
+    const next = !researchMode;
+    setResearchMode(next);
+    if (activeId) {
+      try { await updateConversation(activeId, { research_mode: next }); } catch (_) {}
+    }
+  }, [researchMode, activeId]);
   const [showSkillsSubmenu, setShowSkillsSubmenu] = useState(false);
   const [enabledSkills, setEnabledSkills] = useState<Array<{ id: string; name: string; description?: string }>>([]);
   const [selectedSkill, setSelectedSkill] = useState<{ name: string; slug: string; description?: string } | null>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
   const plusBtnRef = useRef<HTMLButtonElement>(null);
+  // Add-to-project state
+  const [showProjectsSubmenu, setShowProjectsSubmenu] = useState(false);
+  const [projectList, setProjectList] = useState<Project[]>([]);
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
+  const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectDescription, setNewProjectDescription] = useState('');
+  const [projectAddToast, setProjectAddToast] = useState<string | null>(null);
   const [compactStatus, setCompactStatus] = useState<{ state: 'idle' | 'compacting' | 'done' | 'error'; message?: string }>({ state: 'idle' });
   const [showCompactDialog, setShowCompactDialog] = useState(false);
   const [compactInstruction, setCompactInstruction] = useState('');
+  const [showGithubModal, setShowGithubModal] = useState(false);
   const [hasSubscription, setHasSubscription] = useState<boolean | null>(null); // null = loading
   const [contextInfo, setContextInfo] = useState<{ tokens: number; limit: number } | null>(null);
 
@@ -1202,10 +1321,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
   // Load enabled skills for the plus menu
   useEffect(() => {
-    if (!showPlusMenu) { setShowSkillsSubmenu(false); return; }
+    if (!showPlusMenu) { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); return; }
     getSkills().then((data: any) => {
       const all = [...(data.examples || []), ...(data.my_skills || [])];
       setEnabledSkills(all.filter((s: any) => s.enabled).map((s: any) => ({ id: s.id, name: s.name, description: s.description })));
+    }).catch(() => {});
+    getProjects().then((data: Project[]) => {
+      setProjectList((data || []).filter(p => !p.is_archived));
     }).catch(() => {});
   }, [showPlusMenu]);
 
@@ -1213,9 +1335,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   useEffect(() => {
     if (!showPlusMenu) return;
     const handleClick = (e: MouseEvent) => {
-      if (plusMenuRef.current && !plusMenuRef.current.contains(e.target as Node) &&
-        plusBtnRef.current && !plusBtnRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      const insideMenu = plusMenuRef.current && plusMenuRef.current.contains(target);
+      const insideButton = plusBtnRef.current && plusBtnRef.current.contains(target);
+      if (!insideMenu && !insideButton) {
         setShowPlusMenu(false);
+        setShowSkillsSubmenu(false);
+        setShowProjectsSubmenu(false);
       }
     };
     document.addEventListener('mousedown', handleClick);
@@ -1231,6 +1357,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       setCurrentModelString(resolveModelForNewChat());
       setConversationTitle("");
       setContextInfo(null);
+      setCurrentProjectId(null);
+      setPendingProjectId(null);
       // 触发入场动画
       setShowEntranceAnimation(true);
       setTimeout(() => setShowEntranceAnimation(false), 800);
@@ -1718,6 +1846,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       if (data.model) {
         setCurrentModelString(isModelSelectable(data.model) ? data.model : resolveModelForNewChat(data.model));
       }
+      // Restore research mode toggle
+      setResearchMode(!!data.research_mode);
       const normalizedMessages = (data.messages || []).map((msg: any) => {
         // Normalize attachment field names (bridge-server uses camelCase, component expects snake_case)
         if (msg.attachments && Array.isArray(msg.attachments)) {
@@ -1736,6 +1866,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       isAtBottomRef.current = true;
       scheduleScrollToBottomAfterRender();
       setConversationTitle(data.title || 'New Chat');
+      setCurrentProjectId(data.project_id || null);
 
       // 检查是否有活跃的后台生成
       try {
@@ -1859,6 +1990,42 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     }
   };
 
+  const handleAttachToProject = async (project: Project) => {
+    setShowPlusMenu(false);
+    setShowProjectsSubmenu(false);
+    if (activeId) {
+      if (currentProjectId === project.id) return;
+      try {
+        await updateConversation(activeId, { project_id: project.id });
+        setCurrentProjectId(project.id);
+        onNewChat();
+        setProjectAddToast(`Added to ${project.name}`);
+        setTimeout(() => setProjectAddToast(null), 2500);
+      } catch (err) {
+        console.error('Failed to add conversation to project', err);
+      }
+    } else {
+      setPendingProjectId(project.id);
+      setProjectAddToast(`Will add to ${project.name} on send`);
+      setTimeout(() => setProjectAddToast(null), 2500);
+    }
+  };
+
+  const handleCreateProjectFromMenu = async () => {
+    const name = newProjectName.trim();
+    if (!name) return;
+    try {
+      const project = await createProject(name, newProjectDescription.trim());
+      setShowNewProjectDialog(false);
+      setNewProjectName('');
+      setNewProjectDescription('');
+      setProjectList(prev => [project, ...prev]);
+      await handleAttachToProject(project);
+    } catch (err) {
+      console.error('Failed to create project', err);
+    }
+  };
+
   const handleSend = async (overrideText?: string) => {
     const effectiveText = (typeof overrideText === 'string') ? overrideText : inputText;
     // Skill slug is already in the text (inserted when selected from menu)
@@ -1886,12 +2053,24 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
     // 收集已上传的附件
     const uploadedFiles = pendingFiles.filter(f => f.status === 'done' && f.fileId);
-    const attachmentsPayload = uploadedFiles.length > 0
-      ? uploadedFiles.map(f => ({ fileId: f.fileId!, fileName: f.fileName, fileType: f.fileType, mimeType: f.mimeType, size: f.size }))
+    const githubFiles = pendingFiles.filter(f => f.status === 'done' && f.source === 'github');
+    const uploadedPayload = uploadedFiles.map(f => ({ fileId: f.fileId!, fileName: f.fileName, fileType: f.fileType, mimeType: f.mimeType, size: f.size }));
+    const githubPayload = githubFiles.map(f => ({
+      fileId: `github:${f.ghRepo || f.fileName}`,
+      fileName: f.ghRepo || f.fileName,
+      fileType: 'github' as any,
+      mimeType: 'application/x-github',
+      size: 0,
+      source: 'github',
+      ghRepo: f.ghRepo,
+      ghRef: f.ghRef,
+    }));
+    const attachmentsPayload = (uploadedPayload.length + githubPayload.length) > 0
+      ? [...uploadedPayload, ...githubPayload]
       : null;
 
     // 构建乐观 UI 的附件数据
-    const optimisticAttachments = uploadedFiles.map(f => ({
+    const optimisticAttachments: any[] = uploadedFiles.map(f => ({
       id: f.fileId!,
       file_type: f.fileType || 'text',
       file_name: f.fileName,
@@ -1899,6 +2078,18 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       file_size: f.size,
       line_count: f.lineCount,
     }));
+    for (const g of githubFiles) {
+      optimisticAttachments.push({
+        id: `github:${g.ghRepo || g.fileName}`,
+        file_type: 'github',
+        file_name: g.ghRepo || g.fileName,
+        mime_type: 'application/x-github',
+        file_size: 0,
+        source: 'github',
+        gh_repo: g.ghRepo,
+        gh_ref: g.ghRef,
+      });
+    }
 
     // 清空 pendingFiles 并释放预览 URL
     pendingFiles.forEach(f => { if (f.previewUrl) URL.revokeObjectURL(f.previewUrl); });
@@ -1942,7 +2133,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         }
         // 不传临时标题，让后端生成
         console.log("Creating conversation with model:", modelForCreate);
-        const newConv = await createConversation(undefined, modelForCreate);
+        const newConv = await createConversation(undefined, modelForCreate, { research_mode: researchMode });
         console.log("Created conversation response:", newConv);
 
         if (!newConv || !newConv.id) {
@@ -1951,6 +2142,16 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
         conversationId = newConv.id;
         console.log("New Conversation ID:", conversationId);
+        // Attach to pending project if user chose one before sending
+        if (pendingProjectId) {
+          try {
+            await updateConversation(conversationId!, { project_id: pendingProjectId });
+            setCurrentProjectId(pendingProjectId);
+          } catch (e) {
+            console.error('Failed to attach new conversation to project', e);
+          }
+          setPendingProjectId(null);
+        }
         warmEngine(conversationId); // Pre-warm engine while user waits
 
         // Use React Router navigate so useParams stays in sync with the URL
@@ -2152,6 +2353,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             }
             return newMsgs;
           });
+        }
+        if (event && event.startsWith('research_')) {
+          setMessages(prev => applyResearchEvent(prev, event, data));
         }
         // AskUserQuestion — engine needs user input
         if (event === 'ask_user' && data) {
@@ -2594,6 +2798,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             return newMsgs;
           });
         }
+        if (event && event.startsWith('research_')) {
+          setMessages(prev => applyResearchEvent(prev, event, data));
+        }
       },
       undefined,
       (doc) => {
@@ -2793,6 +3000,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             return newMsgs;
           });
         }
+        if (event && event.startsWith('research_')) {
+          setMessages(prev => applyResearchEvent(prev, event, data));
+        }
       },
       undefined,
       (doc) => {
@@ -2839,7 +3049,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   // === 文件上传相关 ===
   const ACCEPTED_TYPES = 'image/png,image/jpeg,image/jpg,image/gif,image/webp,application/pdf,.docx,.xlsx,.pptx,.odt,.rtf,.epub,.txt,.md,.csv,.json,.xml,.yaml,.yml,.js,.jsx,.ts,.tsx,.py,.java,.cpp,.c,.h,.cs,.go,.rs,.rb,.php,.swift,.kt,.scala,.html,.css,.scss,.less,.sql,.sh,.bash,.vue,.svelte,.lua,.r,.m,.pl,.ex,.exs';
 
-  const handleFilesSelected = (files: FileList | File[]) => {
+  const handleFilesSelected = (files: FileList | File[], defaults?: Partial<PendingFile>) => {
     const fileArray = Array.from(files);
     const maxFiles = 20;
     const currentCount = pendingFiles.length;
@@ -2859,6 +3069,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         progress: 0,
         status: 'uploading',
         previewUrl,
+        ...(defaults || {}),
       };
 
       setPendingFiles(prev => [...prev, pending]);
@@ -2907,6 +3118,56 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       }
       return prev.filter(f => f.id !== id);
     });
+  };
+
+  // Handle "Add from GitHub" confirmation: resolve/create conversation,
+  // materialize files into its workspace, then add a visual-only card.
+  const handleGithubAdd = async (payload: GithubAddPayload): Promise<void> => {
+    let convId = activeId;
+    let createdNewConv = false;
+    if (!convId) {
+      const modelForCreate = isModelSelectable(currentModelString)
+        ? currentModelString
+        : resolveModelForNewChat(currentModelString);
+      const newConv = await createConversation(undefined, modelForCreate, { research_mode: researchMode });
+      if (!newConv || !newConv.id) throw new Error('Failed to create conversation');
+      convId = newConv.id;
+      createdNewConv = true;
+      warmEngine(convId);
+      onNewChat();
+    }
+
+    const result = await materializeGithub(
+      convId,
+      payload.repoFullName,
+      payload.ref,
+      payload.selections,
+    );
+
+    const githubCard: PendingFile = {
+      id: Math.random().toString(36).slice(2),
+      file: new File([], 'github-placeholder'),
+      fileName: payload.repoFullName,
+      mimeType: 'application/x-github',
+      size: 0,
+      progress: 100,
+      status: 'done',
+      source: 'github',
+      ghRepo: payload.repoFullName,
+      ghRef: payload.ref,
+      lineCount: result.fileCount,
+    };
+
+    if (createdNewConv) {
+      // Stash the card into draftsStore under the NEW conv key so the mount
+      // effect restores it. Then navigate — the useEffect will pick it up.
+      const text = inputTextRef.current || '';
+      const height = textareaHeightRef.current || inputBarBaseHeight;
+      draftsStore.set(convId, { text, files: [githubCard], height });
+      navigate(`/chat/${convId}`, { replace: true });
+    } else {
+      setPendingFiles(prev => [...prev, githubCard]);
+    }
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -2963,6 +3224,75 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
 
   // --- Render Logic ---
+
+  // Shared overlays rendered in both MODE 1 and MODE 2
+  const sharedProjectOverlays = (
+    <>
+      {showNewProjectDialog && (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40"
+          onClick={() => { setShowNewProjectDialog(false); setNewProjectName(''); setNewProjectDescription(''); }}
+        >
+          <div className="bg-claude-bg border border-claude-border rounded-2xl shadow-xl w-[560px] max-w-[92vw] overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between px-7 pt-6 pb-4">
+              <h2 className="font-[Spectral] text-[22px] text-claude-text" style={{ fontWeight: 600 }}>Create a project</h2>
+              <button
+                onClick={() => { setShowNewProjectDialog(false); setNewProjectName(''); setNewProjectDescription(''); }}
+                className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-lg transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-7 pb-4 space-y-5">
+              <div>
+                <label className="block text-[15px] font-medium text-claude-textSecondary mb-2">What are you working on?</label>
+                <input
+                  type="text"
+                  placeholder="Name your project"
+                  value={newProjectName}
+                  onChange={e => setNewProjectName(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && newProjectName.trim()) handleCreateProjectFromMenu(); }}
+                  className="w-full px-4 py-3 bg-white dark:bg-claude-input border border-gray-200 dark:border-claude-border rounded-xl text-claude-text placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all text-[15px]"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="block text-[15px] font-medium text-claude-textSecondary mb-2">What are you trying to achieve?</label>
+                <textarea
+                  placeholder="Describe your project, goals, subject, etc..."
+                  rows={3}
+                  value={newProjectDescription}
+                  onChange={e => setNewProjectDescription(e.target.value)}
+                  className="w-full px-4 py-3 bg-white dark:bg-claude-input border border-gray-200 dark:border-claude-border rounded-xl text-claude-text placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all text-[15px] resize-none"
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3 px-7 pb-6 pt-2">
+              <button
+                onClick={() => { setShowNewProjectDialog(false); setNewProjectName(''); setNewProjectDescription(''); }}
+                className="px-5 py-2.5 text-[15px] font-medium text-claude-text bg-white dark:bg-claude-bg border border-gray-300 dark:border-claude-border hover:bg-gray-50 dark:hover:bg-claude-hover rounded-xl transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateProjectFromMenu}
+                disabled={!newProjectName.trim()}
+                className="px-5 py-2.5 text-[15px] font-medium text-claude-bg bg-black dark:bg-white dark:text-black hover:opacity-90 rounded-xl transition-opacity disabled:opacity-40"
+              >
+                Create project
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {projectAddToast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-claude-input border border-claude-border rounded-lg shadow-lg text-[13px] text-claude-text flex items-center gap-2">
+          <Check size={14} className="text-[#C6613F]" />
+          {projectAddToast}
+        </div>
+      )}
+    </>
+  );
 
   // MODE 1: Landing Page (No ID)
   if (!activeId && messages.length === 0) {
@@ -3060,6 +3390,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
               <div className="px-4 pb-3 pt-1 flex items-center justify-between flex-shrink-0">
                 <div className="relative flex items-center">
                   <button
+                    ref={plusBtnRef}
                     onClick={() => setShowPlusMenu(prev => !prev)}
                     className="p-2 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-lg transition-colors"
                   >
@@ -3071,15 +3402,75 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                       className="absolute bottom-full left-0 mb-2 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50"
                     >
                       <button
+                        onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
                         onClick={() => { setShowPlusMenu(false); fileInputRef.current?.click(); }}
                         className="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
                       >
                         <Paperclip size={16} className="text-claude-textSecondary" />
                         Add files or photos
                       </button>
-                      <div className="relative">
+                      <button
+                        onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
+                        onClick={() => { setShowPlusMenu(false); setShowGithubModal(true); }}
+                        className="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
+                      >
+                        <Github size={16} className="text-claude-textSecondary" />
+                        Add from GitHub
+                      </button>
+                      {/* Add to project submenu */}
+                      <div className="relative" onMouseLeave={() => setShowProjectsSubmenu(false)}>
                         <button
-                          onMouseEnter={() => setShowSkillsSubmenu(true)}
+                          onMouseEnter={() => { setShowProjectsSubmenu(true); setShowSkillsSubmenu(false); }}
+                          onClick={() => setShowProjectsSubmenu(prev => !prev)}
+                          className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
+                        >
+                          <div className="flex items-center gap-3">
+                            <IconProjects size={16} className="text-claude-textSecondary scale-[1.6]" />
+                            Add to project
+                          </div>
+                          <ChevronDown size={14} className="text-claude-textSecondary -rotate-90" />
+                        </button>
+                        {showProjectsSubmenu && (
+                          <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[320px] overflow-y-auto">
+                            {projectList.length > 0 ? projectList.map(p => {
+                              const isSelected = (activeId && currentProjectId === p.id) || (!activeId && pendingProjectId === p.id);
+                              return (
+                                <button
+                                  key={p.id}
+                                  onClick={() => handleAttachToProject(p)}
+                                  className="w-full flex items-center justify-between gap-2 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors text-left"
+                                >
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <IconProjects size={26} className="text-claude-textSecondary flex-shrink-0" />
+                                    <span className="truncate">{p.name}</span>
+                                  </div>
+                                  {isSelected && <Check size={14} className="text-claude-textSecondary flex-shrink-0" />}
+                                </button>
+                              );
+                            }) : (
+                              <div className="px-4 py-2 text-[12px] text-claude-textSecondary italic">No projects yet</div>
+                            )}
+                            <div className="border-t border-claude-border mt-1 pt-1">
+                              <button
+                                onClick={() => {
+                                  setShowProjectsSubmenu(false);
+                                  setShowPlusMenu(false);
+                                  setNewProjectName('');
+                                  setNewProjectDescription('');
+                                  setShowNewProjectDialog(true);
+                                }}
+                                className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-textSecondary hover:bg-claude-hover transition-colors"
+                              >
+                                <Plus size={14} />
+                                Start a new project
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <div className="relative" onMouseLeave={() => setShowSkillsSubmenu(false)}>
+                        <button
+                          onMouseEnter={() => { setShowSkillsSubmenu(true); setShowProjectsSubmenu(false); }}
                           onClick={() => setShowSkillsSubmenu(prev => !prev)}
                           className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
                         >
@@ -3090,10 +3481,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                           <ChevronDown size={14} className="text-claude-textSecondary -rotate-90" />
                         </button>
                         {showSkillsSubmenu && (
-                          <div
-                            className="absolute left-full bottom-0 ml-1 w-[200px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[300px] overflow-y-auto"
-                            onMouseLeave={() => setShowSkillsSubmenu(false)}
-                          >
+                          <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[320px] overflow-y-auto">
                             {enabledSkills.length > 0 ? enabledSkills.map(skill => (
                               <button
                                 key={skill.id}
@@ -3122,6 +3510,38 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                             </div>
                           </div>
                         )}
+                      </div>
+                      {/* Research toggle */}
+                      <div className="border-t border-claude-border mt-1 pt-1">
+                        <button
+                          onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
+                          onClick={() => { toggleResearchMode(); setShowPlusMenu(false); }}
+                          className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] hover:bg-claude-hover transition-colors"
+                        >
+                          <div className="flex items-center gap-3">
+                            <IconResearch size={16} className={researchMode ? 'text-[#2E7CF6]' : 'text-claude-textSecondary'} />
+                            <span className={researchMode ? 'text-[#2E7CF6] font-medium' : 'text-claude-text'}>Research</span>
+                          </div>
+                          {researchMode && <Check size={14} className="text-[#2E7CF6]" />}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {/* Blue research badge next to + button when enabled */}
+                  {researchMode && (
+                    <div className="relative ml-1 group">
+                      <div className="flex items-center bg-[#DBEAFE] dark:bg-[#1E3A5F] rounded-lg overflow-hidden">
+                        <button
+                          onClick={toggleResearchMode}
+                          className="flex items-center gap-1.5 px-2 py-1.5 hover:bg-[#BFDBFE] dark:hover:bg-[#2A4A75] transition-colors"
+                          title="Research mode — click X to disable"
+                        >
+                          <IconResearch size={16} className="text-[#2E7CF6]" />
+                          <X size={12} className="text-[#2E7CF6] opacity-0 group-hover:opacity-100 transition-opacity" />
+                        </button>
+                      </div>
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2 py-1 bg-[#2a2a2a] text-white dark:bg-[#e8e8e8] dark:text-[#1a1a1a] rounded-md text-[11px] whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity">
+                        Research mode
                       </div>
                     </div>
                   )}
@@ -3157,6 +3577,14 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             )}
           </div>
         </div>
+        <AddFromGithubModal
+          isOpen={showGithubModal}
+          onClose={() => setShowGithubModal(false)}
+          currentContextTokens={contextInfo?.tokens || 0}
+          contextLimit={contextInfo?.limit || 200000}
+          onConfirm={handleGithubAdd}
+        />
+        {sharedProjectOverlays}
       </div>
     );
   }
@@ -3277,6 +3705,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                         className="absolute bottom-full left-0 mb-2 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50"
                       >
                         <button
+                          onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
                           onClick={() => {
                             setShowPlusMenu(false);
                             fileInputRef.current?.click();
@@ -3286,11 +3715,73 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                           <Paperclip size={16} className="text-claude-textSecondary" />
                           Add files or photos
                         </button>
-                        {/* Skills submenu */}
-                        <div className="relative">
+                        <button
+                          onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
+                          onClick={() => {
+                            setShowPlusMenu(false);
+                            setShowGithubModal(true);
+                          }}
+                          className="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
+                        >
+                          <Github size={16} className="text-claude-textSecondary" />
+                          Add from GitHub
+                        </button>
+                        {/* Add to project submenu */}
+                        <div className="relative" onMouseLeave={() => setShowProjectsSubmenu(false)}>
                           <button
-                            onMouseEnter={() => setShowSkillsSubmenu(true)}
-                            onClick={() => setShowSkillsSubmenu(prev => !prev)}
+                            onMouseEnter={() => { setShowProjectsSubmenu(true); setShowSkillsSubmenu(false); }}
+                            onClick={() => setShowProjectsSubmenu(prev => !prev)}
+                            className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
+                          >
+                            <div className="flex items-center gap-3">
+                              <IconProjects size={16} className="text-claude-textSecondary scale-[1.6]" />
+                              Add to project
+                            </div>
+                            <ChevronDown size={14} className="text-claude-textSecondary -rotate-90" />
+                          </button>
+                          {showProjectsSubmenu && (
+                            <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[320px] overflow-y-auto">
+                              {projectList.length > 0 ? projectList.map(p => {
+                                const isSelected = (activeId && currentProjectId === p.id) || (!activeId && pendingProjectId === p.id);
+                                return (
+                                  <button
+                                    key={p.id}
+                                    onClick={() => handleAttachToProject(p)}
+                                    className="w-full flex items-center justify-between gap-2 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors text-left"
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <IconProjects size={26} className="text-claude-textSecondary flex-shrink-0" />
+                                      <span className="truncate">{p.name}</span>
+                                    </div>
+                                    {isSelected && <Check size={14} className="text-claude-textSecondary flex-shrink-0" />}
+                                  </button>
+                                );
+                              }) : (
+                                <div className="px-4 py-2 text-[12px] text-claude-textSecondary italic">No projects yet</div>
+                              )}
+                              <div className="border-t border-claude-border mt-1 pt-1">
+                                <button
+                                  onClick={() => {
+                                    setShowProjectsSubmenu(false);
+                                    setShowPlusMenu(false);
+                                    setNewProjectName('');
+                                    setNewProjectDescription('');
+                                    setShowNewProjectDialog(true);
+                                  }}
+                                  className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-textSecondary hover:bg-claude-hover transition-colors"
+                                >
+                                  <Plus size={14} />
+                                  Start a new project
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        {/* Skills submenu */}
+                        <div className="relative" onMouseLeave={() => setShowSkillsSubmenu(false)}>
+                          <button
+                            onMouseEnter={() => { setShowSkillsSubmenu(true); setShowProjectsSubmenu(false); }}
+                            onClick={(e) => { e.stopPropagation(); setShowSkillsSubmenu(prev => !prev); }}
                             className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
                           >
                             <div className="flex items-center gap-3">
@@ -3300,10 +3791,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                             <ChevronDown size={14} className="text-claude-textSecondary -rotate-90" />
                           </button>
                           {showSkillsSubmenu && enabledSkills.length > 0 && (
-                            <div
-                              className="absolute left-full bottom-0 ml-1 w-[200px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[300px] overflow-y-auto"
-                              onMouseLeave={() => setShowSkillsSubmenu(false)}
-                            >
+                            <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[320px] overflow-y-auto">
                               {enabledSkills.map(skill => (
                                 <button
                                   key={skill.id}
@@ -3336,10 +3824,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                             </div>
                           )}
                           {showSkillsSubmenu && enabledSkills.length === 0 && (
-                            <div
-                              className="absolute left-full bottom-0 ml-1 w-[200px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50"
-                              onMouseLeave={() => setShowSkillsSubmenu(false)}
-                            >
+                            <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50">
                               <div className="px-4 py-2 text-[12px] text-claude-textSecondary italic">No skills enabled</div>
                               <div className="border-t border-claude-border mt-1 pt-1">
                                 <button
@@ -3357,6 +3842,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                           )}
                         </div>
                         <button
+                          onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
                           onClick={() => {
                             setShowPlusMenu(false);
                             if (!activeId || compactStatus.state === 'compacting') return;
@@ -3368,6 +3854,38 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                           <ListCollapse size={16} className="text-claude-textSecondary" />
                           Compact conversation
                         </button>
+                        {/* Research toggle */}
+                        <div className="border-t border-claude-border mt-1 pt-1">
+                          <button
+                            onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
+                            onClick={() => { toggleResearchMode(); setShowPlusMenu(false); }}
+                            className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] hover:bg-claude-hover transition-colors"
+                          >
+                            <div className="flex items-center gap-3">
+                              <IconResearch size={16} className={researchMode ? 'text-[#2E7CF6]' : 'text-claude-textSecondary'} />
+                              <span className={researchMode ? 'text-[#2E7CF6] font-medium' : 'text-claude-text'}>Research</span>
+                            </div>
+                            {researchMode && <Check size={14} className="text-[#2E7CF6]" />}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {/* Blue research badge next to + button when enabled */}
+                    {researchMode && (
+                      <div className="relative ml-1 group">
+                        <div className="flex items-center bg-[#DBEAFE] dark:bg-[#1E3A5F] rounded-lg overflow-hidden">
+                          <button
+                            onClick={toggleResearchMode}
+                            className="flex items-center gap-1.5 px-2 py-1.5 hover:bg-[#BFDBFE] dark:hover:bg-[#2A4A75] transition-colors"
+                            title="Research mode — click X to disable"
+                          >
+                            <IconResearch size={16} className="text-[#2E7CF6]" />
+                            <X size={12} className="text-[#2E7CF6] opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </button>
+                        </div>
+                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2 py-1 bg-[#2a2a2a] text-white dark:bg-[#e8e8e8] dark:text-[#1a1a1a] rounded-md text-[11px] whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity">
+                          Research mode
+                        </div>
                       </div>
                     )}
                     {contextInfo && contextInfo.tokens > 0 && (() => {
@@ -3539,6 +4057,21 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         </div>
       )}
 
+      <AddFromGithubModal
+        isOpen={showGithubModal}
+        onClose={() => setShowGithubModal(false)}
+        currentContextTokens={contextInfo?.tokens || 0}
+        contextLimit={contextInfo?.limit || 200000}
+        onConfirm={(bundle: GithubBundlePayload) => {
+          if (!bundle || !bundle.file) return;
+          handleFilesSelected([bundle.file], {
+            source: 'github',
+            ghRepo: bundle.repoFullName,
+            ghRef: bundle.ref,
+          });
+        }}
+      />
+
       {/* Compact conversation dialog */}
       {showCompactDialog && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40" onClick={() => setShowCompactDialog(false)}>
@@ -3600,6 +4133,25 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           </div>
         </div>
       )}
+
+      {sharedProjectOverlays}
+
+      {/* Research panel — fixed right-side drawer */}
+      {openedResearchMsgId && (() => {
+        const liveMsg = messages.find(m => m.id === openedResearchMsgId);
+        if (!liveMsg || !liveMsg.research) return null;
+        return (
+          <>
+            <div
+              className="fixed inset-0 z-[60] bg-black/20"
+              onClick={() => setOpenedResearchMsgId(null)}
+            />
+            <div className="fixed top-0 right-0 bottom-0 w-[440px] z-[61] bg-claude-bg border-l border-claude-border shadow-2xl flex flex-col">
+              <ResearchPanel research={liveMsg.research} onClose={() => setOpenedResearchMsgId(null)} />
+            </div>
+          </>
+        );
+      })()}
     </div>
   );
 };

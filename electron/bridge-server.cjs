@@ -7,6 +7,21 @@ const os = require('os');
 const { v4: uuidv4 } = require('uuid');
 const { app } = require('electron');
 const { TOOL_DEFINITIONS, executeTool } = require('./tools.cjs');
+const { runResearchPipeline } = require('./research-orchestrator.cjs');
+
+// Heuristic: when research_mode is enabled, decide whether THIS message
+// should actually trigger the research pipeline. Greetings, very short
+// questions, and slash commands do not. Real research questions do.
+function shouldRunResearch(message) {
+    const trimmed = (message || '').trim();
+    if (!trimmed) return false;
+    if (trimmed.length < 20) return false;
+    if (trimmed.startsWith('/')) return false;
+    // Common short conversational openers
+    const greetings = /^(hi|hello|hey|yo|sup|你好|嗨|哈喽|在吗|thanks?|thank you|谢谢|ok|okay|好的)\b/i;
+    if (greetings.test(trimmed) && trimmed.length < 40) return false;
+    return true;
+}
 
 // No longer needed 鈥?SDK removed, using direct API calls
 function enableNodeModeForChildProcesses() {
@@ -1380,7 +1395,7 @@ function initServer(mainWindow) {
 
     server.post('/api/conversations', (req, res) => {
         const id = uuidv4();
-        const { title = 'New Conversation', model = 'claude-sonnet-4-6', project_id } = req.body;
+        const { title = 'New Conversation', model = 'claude-sonnet-4-6', project_id, research_mode = false } = req.body;
         const workspacePath = path.join(workspacesDir, id);
 
         if (!fs.existsSync(workspacePath)) {
@@ -1402,12 +1417,13 @@ function initServer(mainWindow) {
 
         const newConv = {
             id, title, model, workspace_path: workspacePath, created_at: new Date().toISOString(),
+            research_mode: !!research_mode,
             ...(project_id ? { project_id } : {}),
         };
         db.conversations.push(newConv);
         saveDb();
 
-        res.json({ id, title, model, workspace_path: workspacePath });
+        res.json({ id, title, model, workspace_path: workspacePath, research_mode: !!research_mode });
     });
 
     server.get('/api/conversations/:id', (req, res) => {
@@ -1442,12 +1458,15 @@ function initServer(mainWindow) {
                         || (a.mime_type && a.mime_type.startsWith('image/'))
                         || (a.mimeType && a.mimeType.startsWith('image/'))
                         || imageExts.includes(ext);
+                    const src = a.source;
+                    const isGithub = src === 'github' || a.file_type === 'github' || a.fileType === 'github';
                     return {
-                        id: a.id || a.fileId || '',
+                        id: a.id || a.fileId || (isGithub ? ('github:' + (a.gh_repo || a.ghRepo || name)) : ''),
                         file_name: name || 'file',
-                        file_type: isImg ? 'image' : (a.file_type || a.fileType || 'document'),
-                        mime_type: a.mime_type || a.mimeType || (isImg ? 'image/' + (ext === 'jpg' ? 'jpeg' : ext) : ''),
+                        file_type: isGithub ? 'github' : (isImg ? 'image' : (a.file_type || a.fileType || 'document')),
+                        mime_type: a.mime_type || a.mimeType || (isImg ? 'image/' + (ext === 'jpg' ? 'jpeg' : ext) : (isGithub ? 'application/x-github' : '')),
                         file_size: a.file_size || a.size || 0,
+                        ...(isGithub ? { source: 'github', gh_repo: a.gh_repo || a.ghRepo, gh_ref: a.gh_ref || a.ghRef } : {}),
                     };
                 });
             }
@@ -1486,6 +1505,9 @@ function initServer(mainWindow) {
             } else {
                 delete conv.project_id;
             }
+        }
+        if ('research_mode' in req.body) {
+            conv.research_mode = !!req.body.research_mode;
         }
 
         saveDb();
@@ -2460,6 +2482,190 @@ You have the following skills available. When a user's request matches a skill's
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
 
+    // Helper: fetch a GitHub blob as Buffer (handles both git blobs API and contents API fallback)
+    function githubFetchBlob(owner, repoName, sha, accessToken) {
+        return new Promise((resolve, reject) => {
+            const https = require('https');
+            const req = https.request({
+                hostname: 'api.github.com',
+                path: `/repos/${owner}/${repoName}/git/blobs/${sha}`,
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'User-Agent': 'ClaudeDesktop',
+                    'Accept': 'application/vnd.github.v3+json',
+                }
+            }, (resp) => {
+                let body = '';
+                resp.on('data', c => body += c);
+                resp.on('end', () => {
+                    try {
+                        if (resp.statusCode !== 200) return reject(new Error('blob status ' + resp.statusCode));
+                        const data = JSON.parse(body);
+                        if (!data || !data.content) return reject(new Error('blob missing content'));
+                        resolve(Buffer.from(String(data.content).replace(/\n/g, ''), 'base64'));
+                    } catch (e) { reject(e); }
+                });
+            });
+            req.on('error', reject);
+            req.end();
+        });
+    }
+
+    // POST /api/github/materialize — write selected files to conv workspace
+    server.post('/api/github/materialize', async (req, res) => {
+        const token = loadGithubToken();
+        if (!token?.access_token) return res.status(401).json({ error: 'Not connected' });
+        const { conversationId, repoFullName, ref, selections } = req.body || {};
+        if (!conversationId || !repoFullName || !Array.isArray(selections) || selections.length === 0) {
+            return res.status(400).json({ error: 'Missing conversationId, repoFullName, or selections' });
+        }
+        const conv = db.conversations.find(c => c.id === conversationId);
+        if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+        const workspacePath = conv.workspace_path;
+        if (!workspacePath) return res.status(500).json({ error: 'Conversation has no workspace_path' });
+        try { fs.mkdirSync(workspacePath, { recursive: true }); } catch (_) {}
+
+        const [owner, repoName] = String(repoFullName).split('/');
+        if (!owner || !repoName) return res.status(400).json({ error: 'Invalid repoFullName' });
+
+        try {
+            // Resolve default branch if ref not provided
+            let refToUse = ref;
+            if (!refToUse) {
+                const r = await githubApiRequest(`/repos/${owner}/${repoName}`, token.access_token);
+                if (r.status !== 200) return res.status(r.status).json({ error: 'Repo fetch failed' });
+                refToUse = r.data.default_branch || 'main';
+            }
+            // Resolve tree sha via branch
+            const bRes = await githubApiRequest(`/repos/${owner}/${repoName}/branches/${encodeURIComponent(refToUse)}`, token.access_token);
+            if (bRes.status !== 200) return res.status(bRes.status).json({ error: 'Branch fetch failed' });
+            const treeSha = bRes.data?.commit?.commit?.tree?.sha;
+            if (!treeSha) return res.status(404).json({ error: 'Tree sha not found' });
+            // Fetch recursive tree (includes sha per blob)
+            const treeRes = await githubApiRequest(`/repos/${owner}/${repoName}/git/trees/${treeSha}?recursive=1`, token.access_token);
+            if (treeRes.status !== 200) return res.status(treeRes.status).json({ error: 'Tree fetch failed' });
+            const tree = (treeRes.data && Array.isArray(treeRes.data.tree)) ? treeRes.data.tree : [];
+
+            // Expand selections to concrete blobs
+            const seen = Object.create(null);
+            const toFetch = [];
+            for (const sel of selections) {
+                if (!sel || typeof sel.path !== 'string') continue;
+                if (sel.isFolder) {
+                    const prefix = sel.path === '' ? '' : sel.path + '/';
+                    for (const t of tree) {
+                        if (!t || t.type !== 'blob') continue;
+                        if (prefix !== '' && String(t.path).indexOf(prefix) !== 0) continue;
+                        if (seen[t.path]) continue;
+                        seen[t.path] = true;
+                        toFetch.push({ path: t.path, sha: t.sha, size: t.size || 0 });
+                    }
+                } else {
+                    for (const t of tree) {
+                        if (t && t.type === 'blob' && t.path === sel.path) {
+                            if (!seen[t.path]) {
+                                seen[t.path] = true;
+                                toFetch.push({ path: t.path, sha: t.sha, size: t.size || 0 });
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (toFetch.length === 0) {
+                return res.status(400).json({ error: 'No files matched selection' });
+            }
+
+            // Write target root: <workspace>/github/<owner>/<repo>
+            const targetRoot = path.join(workspacePath, 'github', owner, repoName);
+            fs.mkdirSync(targetRoot, { recursive: true });
+
+            // Parallel fetch with concurrency limit
+            const CONCURRENCY = 8;
+            let cursor = 0;
+            const materialized = [];
+            const errors = [];
+            const runWorker = async () => {
+                while (true) {
+                    const idx = cursor++;
+                    if (idx >= toFetch.length) return;
+                    const f = toFetch[idx];
+                    try {
+                        const buf = await githubFetchBlob(owner, repoName, f.sha, token.access_token);
+                        const outPath = path.join(targetRoot, f.path);
+                        fs.mkdirSync(path.dirname(outPath), { recursive: true });
+                        fs.writeFileSync(outPath, buf);
+                        materialized.push({ path: f.path, size: f.size });
+                    } catch (e) {
+                        errors.push({ path: f.path, error: (e && e.message) || String(e) });
+                    }
+                }
+            };
+            const workers = [];
+            const workerCount = Math.min(CONCURRENCY, toFetch.length);
+            for (let w = 0; w < workerCount; w++) workers.push(runWorker());
+            await Promise.all(workers);
+
+            // Persist metadata (replace any existing entry for this repo)
+            const relRoot = `./github/${owner}/${repoName}`;
+            const metaPath = path.join(workspacePath, '.github-context.json');
+            let meta = { repos: [] };
+            if (fs.existsSync(metaPath)) {
+                try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) || { repos: [] }; } catch (_) { meta = { repos: [] }; }
+            }
+            if (!Array.isArray(meta.repos)) meta.repos = [];
+            meta.repos = meta.repos.filter(r => r && r.repo !== repoFullName);
+            meta.repos.push({
+                repo: repoFullName,
+                ref: refToUse,
+                rootDir: relRoot,
+                files: materialized,
+                addedAt: new Date().toISOString(),
+            });
+            try { fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2)); } catch (_) {}
+
+            console.log(`[GitHub Materialize] ${repoFullName} — wrote ${materialized.length}/${toFetch.length} files to ${targetRoot}`);
+
+            res.json({
+                ok: true,
+                repoFullName,
+                ref: refToUse,
+                rootDir: relRoot,
+                fileCount: materialized.length,
+                skipped: errors.length,
+            });
+        } catch (e) {
+            console.error('[GitHub Materialize] error:', e);
+            res.status(500).json({ error: (e && e.message) || String(e) });
+        }
+    });
+
+    // GET /api/github/repos/:owner/:repo/tree — recursive git tree (for folder size calc)
+    server.get('/api/github/repos/:owner/:repo/tree', async (req, res) => {
+        const token = loadGithubToken();
+        if (!token?.access_token) return res.status(401).json({ error: 'Not connected' });
+        try {
+            const { owner, repo } = req.params;
+            // Resolve default branch
+            const repoRes = await githubApiRequest(`/repos/${owner}/${repo}`, token.access_token);
+            if (repoRes.status !== 200) return res.status(repoRes.status).json({ error: 'Repo fetch failed' });
+            const ref = req.query.ref || repoRes.data.default_branch || 'main';
+            const bRes = await githubApiRequest(`/repos/${owner}/${repo}/branches/${encodeURIComponent(ref)}`, token.access_token);
+            if (bRes.status !== 200) return res.status(bRes.status).json({ error: 'Branch fetch failed' });
+            const treeSha = bRes.data?.commit?.commit?.tree?.sha;
+            if (!treeSha) return res.status(404).json({ error: 'Tree sha not found' });
+            const { status, data } = await githubApiRequest(`/repos/${owner}/${repo}/git/trees/${treeSha}?recursive=1`, token.access_token);
+            if (status !== 200) return res.status(status).json({ error: 'GitHub API error' });
+            res.json({
+                sha: data.sha,
+                truncated: !!data.truncated,
+                tree: (data.tree || []).map(t => ({ path: t.path, type: t.type, size: t.size || 0 })),
+            });
+        } catch (e) { res.status(500).json({ error: e.message }); }
+    });
+
     // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
     //  CHAT ENDPOINT 鈥?Claude Code Engine via Bun CLI subprocess
     // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
@@ -2828,6 +3034,10 @@ You have the following skills available. When a user's request matches a skill's
                 if (tc3) { tc3.status = cb.is_error ? 'error' : 'done'; tc3.result = trText; }
                 if (cb.is_error) console.warn('[ToolError]', tn || '(unknown)', '| conv=', convId, '| input=', summarizeToolInputForLog(tn, tc3 && tc3.input), '| result=', trText.slice(0, 500));
                 turn.lastToolDoneTextLen = turn.assistantText.length;
+                // Emit offset immediately so frontend can split "work text" vs "final answer"
+                // in real-time — otherwise assistant text generated after a tool completes
+                // accumulates inside the tool card area until finishTurn.
+                sendSSE({ type: 'tool_text_offset', offset: turn.lastToolDoneTextLen });
                 if (tn === 'WebSearch' && trText) { try { var wsQ = ''; var qM = trText.match(/query:\s*"([^"]+)"/); if (qM) wsQ = qM[1]; var wsS = []; var lM = trText.match(/Links:\s*(\[[\s\S]*?\])\s*\n/); if (lM) { try { var lnk = JSON.parse(lM[1]); if (Array.isArray(lnk)) wsS = lnk.filter(function(l){return l.url;}).map(function(l){return {url:l.url,title:l.title||''};}); } catch(_){} } if (wsS.length>0&&wsQ) { sendSSE({type:'search_sources',sources:wsS,query:wsQ}); turn.searchLogs.push({query:wsQ,results:wsS}); } } catch(_){} }
                 if (!HIDDEN_TOOLS.has(tn)) { ensureStart(cb.tool_use_id); sendSSE({ type: 'tool_use_done', tool_use_id: cb.tool_use_id, content: trText.slice(0, 50000), is_error: cb.is_error || false }); }
             }
@@ -2837,6 +3047,8 @@ You have the following skills available. When a user's request matches a skill's
             var tc2 = turn.toolCalls.get(evt.tool_use_id), toolName = tc2 ? tc2.name : '';
             if (tc2) { tc2.status = evt.is_error ? 'error' : 'done'; tc2.result = resultText; }
             if (evt.is_error) console.warn('[ToolError]', toolName || '(unknown)', '| conv=', convId, '| input=', summarizeToolInputForLog(toolName, tc2 && tc2.input), '| result=', resultText.slice(0, 500));
+            turn.lastToolDoneTextLen = turn.assistantText.length;
+            sendSSE({ type: 'tool_text_offset', offset: turn.lastToolDoneTextLen });
             if (toolName === 'WebSearch' && resultText) { try { var qm2=resultText.match(/query:\s*"([^"]+)"/); var lm2=resultText.match(/Links:\s*(\[[\s\S]*?\])\s*\n/); if(qm2&&lm2){var lk2=JSON.parse(lm2[1]); var sr=lk2.filter(function(l){return l.url;}).map(function(l){return{url:l.url,title:l.title||''};});if(sr.length>0)sendSSE({type:'search_sources',sources:sr,query:qm2[1]});} } catch(_){} }
             if (toolName === 'Write' && tc2 && tc2.input && tc2.input.file_path) { var prevId = turn.writtenFiles.get(tc2.input.file_path); if (prevId) turn.toolCalls.delete(prevId); turn.writtenFiles.set(tc2.input.file_path, evt.tool_use_id); }
             if (!HIDDEN_TOOLS.has(toolName)) { ensureStart(evt.tool_use_id); sendSSE({ type: 'tool_use_done', tool_use_id: evt.tool_use_id, content: resultText.slice(0, 50000), is_error: evt.is_error || false }); }
@@ -2937,6 +3149,11 @@ You have the following skills available. When a user's request matches a skill's
         const envVars = Object.assign({}, process.env);
         if (gitBashPath && !envVars.CLAUDE_CODE_GIT_BASH_PATH) {
             envVars.CLAUDE_CODE_GIT_BASH_PATH = gitBashPath;
+        }
+        // Raise Read tool's per-file token cap so users can ingest larger files from github/workspace
+        // without repeated failed reads. Default in engine is 25000.
+        if (!envVars.CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS) {
+            envVars.CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS = '80000';
         }
         if (apiFormat === 'openai' && proxyPort > 0) {
             proxyTarget = { apiKey, baseUrl, model: modelId, format: 'openai', conversationId: convId };
@@ -3070,9 +3287,43 @@ You have the following skills available. When a user's request matches a skill's
             let finalPrompt = message;
             const imageFileNames = []; // image files copied to workspace
 
+            // 鈹€鈹€ 1a. GitHub content index: inject if .github-context.json exists 鈹€鈹€
+            try {
+                const ghMetaPath = path.join(conv.workspace_path, '.github-context.json');
+                if (fs.existsSync(ghMetaPath)) {
+                    const ghMeta = JSON.parse(fs.readFileSync(ghMetaPath, 'utf8'));
+                    if (ghMeta && Array.isArray(ghMeta.repos) && ghMeta.repos.length > 0) {
+                        let ghBlock = '\n\n[GitHub content available in this workspace:]\n';
+                        for (const r of ghMeta.repos) {
+                            if (!r || !r.repo) continue;
+                            ghBlock += `\nRepository: ${r.repo} (branch: ${r.ref || 'main'}) — located at ${r.rootDir}/\n`;
+                            const files = Array.isArray(r.files) ? r.files : [];
+                            if (files.length > 0) {
+                                const MAX_LIST = 80;
+                                ghBlock += `Files (${files.length} total):\n`;
+                                const shown = files.slice(0, MAX_LIST);
+                                for (const f of shown) {
+                                    if (f && f.path) ghBlock += `- ${r.rootDir}/${f.path}\n`;
+                                }
+                                if (files.length > MAX_LIST) {
+                                    ghBlock += `- ... and ${files.length - MAX_LIST} more (use Glob to list all)\n`;
+                                }
+                            }
+                        }
+                        ghBlock += '\nUse Glob / Grep / FileRead / Bash to explore these files as needed. Binary files (images, PDFs, archives) are preserved as-is on disk.\n';
+                        finalPrompt += ghBlock;
+                    }
+                }
+            } catch (e) {
+                console.warn('[Chat] GitHub context inject failed:', e.message);
+            }
+
             if (attachments && attachments.length > 0) {
                 const copiedFiles = [];
                 for (const att of attachments) {
+                    // Skip virtual github attachments — they're not real uploaded files,
+                    // the content is already materialized in workspace/github/ and injected via .github-context.json
+                    if (att && (att.source === 'github' || att.fileType === 'github')) continue;
                     let srcPath = att.localPath;
                     if (!srcPath && att.fileId) {
                         for (const dir of [path.join(workspacesDir, conversation_id, '.uploads'), path.join(workspacesDir, 'temp', '.uploads')]) {
@@ -3129,9 +3380,58 @@ You have the following skills available. When a user's request matches a skill's
                 id: uuidv4(), conversation_id, role: 'user',
                 content: JSON.stringify([{ type: 'text', text: message }]),
                 created_at: new Date().toISOString(),
-                attachments: attachments && attachments.length > 0 ? attachments.map(a => ({ fileId: a.fileId, fileName: a.fileName, fileType: a.fileType, mimeType: a.mimeType, size: a.size })) : undefined
+                attachments: attachments && attachments.length > 0 ? attachments.map(a => ({ fileId: a.fileId, fileName: a.fileName, fileType: a.fileType, mimeType: a.mimeType, size: a.size, source: a.source, gh_repo: a.ghRepo, gh_ref: a.ghRef })) : undefined
             });
             saveDb();
+
+            // 鈹€鈹€ 2.5. Research mode routing 鈹€鈹€
+            // If conversation has research_mode enabled and the message looks like
+            // a research-worthy question, divert to the research orchestrator and
+            // bypass the engine entirely. Short messages, slash commands, and
+            // greetings still go through the normal chat path.
+            if (conv.research_mode && shouldRunResearch(message)) {
+                const config = resolveChatConfig(conv, user_mode, env_token, env_base_url);
+                console.log('[Research] Routing to orchestrator',
+                    '| conv=', conversation_id,
+                    '| model=', config.modelId,
+                    '| msgLen=', (message || '').length);
+                try {
+                    const result = await runResearchPipeline({
+                        query: message,
+                        apiKey: config.apiKey,
+                        baseUrl: config.baseUrl,
+                        model: config.modelId,
+                        sendSSE,
+                    });
+                    // Save assistant message with the final report and research metadata
+                    db.messages.push({
+                        id: uuidv4(),
+                        conversation_id,
+                        role: 'assistant',
+                        content: JSON.stringify([{ type: 'text', text: result.report }]),
+                        created_at: new Date().toISOString(),
+                        research: {
+                            plan: result.plan,
+                            sub_results: result.sub_results.map(r => ({
+                                sub_question: r.sub_question,
+                                findings: r.findings,
+                                sources: r.sources,
+                            })),
+                            sources: result.sources,
+                        },
+                    });
+                    saveDb();
+                    sendSSE({ type: 'message_stop' });
+                } catch (err) {
+                    console.error('[Research] Pipeline error:', err);
+                    sendSSE({ type: 'error', error: err.message || 'Research pipeline failed' });
+                    sendSSE({ type: 'message_stop' });
+                }
+                try { res.end(); } catch (_) {}
+                const stream = activeStreams.get(conversation_id);
+                if (stream) { stream.done = true; }
+                return;
+            }
 
             // 鈹€鈹€ 3. Get or create persistent engine 鈹€鈹€
             const config = resolveChatConfig(conv, user_mode, env_token, env_base_url);
