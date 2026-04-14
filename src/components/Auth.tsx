@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { ArrowLeft } from 'lucide-react';
 import { login, register, sendCode, forgotPassword, resetPassword, gatewayLogin } from '../api';
 
 type View = 'login' | 'register' | 'verify' | 'forgot' | 'reset';
@@ -36,6 +37,17 @@ const Auth = () => {
   const strength = showStrength ? getPasswordStrength(password) : null;
 
   const isElectron = !!(window as any).electronAPI?.isElectron;
+
+  const handleBackToSetup = () => {
+    localStorage.removeItem('onboarding_done');
+    localStorage.removeItem('user_mode');
+    localStorage.removeItem('ANTHROPIC_API_KEY');
+    localStorage.removeItem('ANTHROPIC_BASE_URL');
+    localStorage.removeItem('gateway_user');
+    localStorage.removeItem('auth_token');
+    window.location.hash = '#/';
+    window.location.reload();
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -176,7 +188,24 @@ const Auth = () => {
   );
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#F8F8F6] font-sans">
+    <div className="min-h-screen flex flex-col bg-[#F8F8F6] font-sans">
+      {isElectron && (
+        <header
+          className="flex h-12 w-full shrink-0 items-center border-b border-[#E5E5E5] bg-[#F8F8F6] px-2"
+          style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+        >
+          <button
+            type="button"
+            onClick={handleBackToSetup}
+            className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[#393939] hover:bg-black/[0.04] transition-colors"
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            <ArrowLeft size={18} strokeWidth={2} className="text-[#73726C]" />
+            重新选择用户模式
+          </button>
+        </header>
+      )}
+      <div className="flex flex-1 items-center justify-center p-4">
       <div className="w-full max-w-md p-8 bg-white rounded-2xl shadow-sm border border-[#E5E5E5]">
         <div className="text-center mb-8">
           <h1 className="text-3xl font-serif-claude text-[#222] mb-2">Claude</h1>
@@ -205,6 +234,7 @@ const Auth = () => {
           </form>
         )}
 
+      </div>
       </div>
     </div>
   );

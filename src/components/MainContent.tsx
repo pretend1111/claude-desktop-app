@@ -2766,13 +2766,12 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       : [];
     // Normalize to snake_case for component compatibility
     const attachments = raw.map((att: any) => ({
+      ...att,
       id: att.id || att.fileId || '',
       file_name: att.file_name || att.fileName || 'file',
       file_type: att.file_type || att.fileType || 'document',
       mime_type: att.mime_type || att.mimeType || '',
       file_size: att.file_size || att.size || 0,
-      ...att,
-      id: att.id || att.fileId || '', // ensure id wins over ...att spread
     }));
     const attachmentIds = attachments.map((att: any) => att.id);
     return {

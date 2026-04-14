@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { HashRouter, Routes, Route, Navigate, useLocation, useParams, useNavigate } from 'react-router-dom';
+import { HashRouter, Routes, Route, Navigate, Outlet, useLocation, useParams, useNavigate } from 'react-router-dom';
 import { FileText, ChevronDown, Trash, Pencil, Star, BellRing, Menu, Folder, ArrowLeft, ArrowRight } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import MainContent from './components/MainContent';
@@ -246,6 +246,45 @@ const ChatHeader = ({
   );
 };
 
+/** Git Bash / 首次引导：必须在所有路由之上，否则 #/login 只渲染 Auth，无法再次进入 Onboarding */
+const RootLayout = () => {
+  const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('onboarding_done'));
+  const [needsGitBash, setNeedsGitBash] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const status = await getSystemStatus();
+        if (cancelled) return;
+        if (status.gitBash.required && !status.gitBash.found) {
+          setNeedsGitBash(true);
+        }
+      } catch {
+        if (!cancelled) setTimeout(check, 1500);
+      }
+    };
+    check();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (needsGitBash) {
+    return <GitBashRequiredModal onResolved={() => setNeedsGitBash(false)} />;
+  }
+
+  if (showOnboarding) {
+    return (
+      <Onboarding
+        onComplete={() => {
+          setShowOnboarding(false);
+        }}
+      />
+    );
+  }
+
+  return <Outlet />;
+};
+
 const Layout = () => {
   const [unreadAnnouncements, setUnreadAnnouncements] = useState<Array<{
     id: number;
@@ -260,30 +299,15 @@ const Layout = () => {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [newChatKey, setNewChatKey] = useState(0);
   const [authChecked, setAuthChecked] = useState(true);
-  const [authValid, setAuthValid] = useState(true);
+  const [authValid, setAuthValid] = useState(() => {
+    const isElectron = !!(typeof window !== 'undefined' && (window as any).electronAPI?.isElectron);
+    if (!isElectron) return true;
+    const userMode = localStorage.getItem('user_mode');
+    if (userMode === 'selfhosted') return true;
+    return !!(localStorage.getItem('ANTHROPIC_API_KEY') && localStorage.getItem('gateway_user'));
+  });
   const [showSettings, setShowSettings] = useState(false);
   const [showUpgrade, setShowUpgrade] = useState(false);
-  const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('onboarding_done'));
-  const [needsGitBash, setNeedsGitBash] = useState(false);
-
-  // Check for git-bash on Windows (required by Claude Code SDK)
-  useEffect(() => {
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const status = await getSystemStatus();
-        if (cancelled) return;
-        if (status.gitBash.required && !status.gitBash.found) {
-          setNeedsGitBash(true);
-        }
-      } catch {
-        // Bridge server not ready yet — retry shortly
-        if (!cancelled) setTimeout(check, 1500);
-      }
-    };
-    check();
-    return () => { cancelled = true; };
-  }, []);
 
   // Document panel state
   const [documentPanelDoc, setDocumentPanelDoc] = useState<DocumentInfo | null>(null);
@@ -552,26 +576,6 @@ const Layout = () => {
     toggleAbsLeft: 8, // Collapsed State Left Position
   });
 
-  // Git-bash required (Windows): block app until installed
-  if (needsGitBash) {
-    return <GitBashRequiredModal onResolved={() => setNeedsGitBash(false)} />;
-  }
-
-  // Onboarding: show on first launch
-  if (showOnboarding) {
-    return <Onboarding onComplete={() => {
-      setShowOnboarding(false);
-      // Re-evaluate auth after onboarding
-      const userMode = localStorage.getItem('user_mode');
-      if (userMode === 'selfhosted') {
-        setAuthValid(true);
-      } else {
-        const hasKey = localStorage.getItem('ANTHROPIC_API_KEY') && localStorage.getItem('gateway_user');
-        setAuthValid(!!hasKey);
-      }
-    }} />;
-  }
-
   // Guard: check if logged in
   if (!authChecked) {
     return null; // 验证中，不渲染
@@ -824,23 +828,25 @@ const App = () => {
   return (
     <HashRouter>
       <Routes>
-        <Route path="/login" element={<Auth />} />
-        <Route path="/admin" element={<AdminLayout />}>
-          <Route index element={<AdminDashboard />} />
-          <Route path="keys" element={<AdminKeyPool />} />
-          <Route path="models" element={<AdminModels />} />
-          <Route path="users" element={<AdminUsers />} />
-          <Route path="announcements" element={<AdminAnnouncements />} />
-          <Route path="plans" element={<AdminPlans />} />
-          <Route path="redemption" element={<AdminRedemption />} />
+        <Route element={<RootLayout />}>
+          <Route path="/login" element={<Auth />} />
+          <Route path="/admin" element={<AdminLayout />}>
+            <Route index element={<AdminDashboard />} />
+            <Route path="keys" element={<AdminKeyPool />} />
+            <Route path="models" element={<AdminModels />} />
+            <Route path="users" element={<AdminUsers />} />
+            <Route path="announcements" element={<AdminAnnouncements />} />
+            <Route path="plans" element={<AdminPlans />} />
+            <Route path="redemption" element={<AdminRedemption />} />
+          </Route>
+          <Route path="/" element={<Layout />} />
+          <Route path="/chats" element={<Layout />} />
+          <Route path="/customize" element={<Layout />} />
+          <Route path="/projects" element={<Layout />} />
+          <Route path="/artifacts" element={<Layout />} />
+          <Route path="/chat/:id" element={<Layout />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
-        <Route path="/" element={<Layout />} />
-        <Route path="/chats" element={<Layout />} />
-        <Route path="/customize" element={<Layout />} />
-        <Route path="/projects" element={<Layout />} />
-        <Route path="/artifacts" element={<Layout />} />
-        <Route path="/chat/:id" element={<Layout />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </HashRouter>
   );
