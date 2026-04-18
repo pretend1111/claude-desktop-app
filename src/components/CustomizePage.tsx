@@ -2,16 +2,15 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { flushSync } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import {
-  ArrowLeft, Plus, Search, Trash2, Sparkles, LayoutGrid, FileText,
+  ArrowLeft, Plus, Search, Trash2, Sparkles, FileText,
   ChevronRight, ChevronDown, Folder, File, MoreHorizontal, Info, Eye, Code,
-  Settings, Check, MessageSquare, ClipboardList, Upload, Github, X, FolderPlus
+  MessageSquare, ClipboardList, Upload, Github, X, FolderPlus
 } from 'lucide-react';
 import MarkdownRenderer, { CodeBlock } from './MarkdownRenderer';
+import DirectoryModal, { type ConnectorAction, type DirectorySection } from './customize/DirectoryModal';
 import { getSkills, getSkillDetail, getSkillFile, createSkill, updateSkill, deleteSkill, toggleSkill, importSkill, getGithubStatus, getGithubAuthUrl, disconnectGithub } from '../api';
-import searchIconImg from '../assets/icons/search-icon.png';
 import skillsImg from '../assets/icons/skills.png';
 import connectorsImg from '../assets/icons/connectors.png';
-import customizeIconImg from '../assets/icons/customize-icon.png';
 import customizeMainImg from '../assets/icons/customize-main.png';
 import createSkillsImg from '../assets/icons/create-skills.png';
 
@@ -69,6 +68,7 @@ const SKILL_CREATOR_FILES = [
   },
   { name: 'LICENSE.txt', type: 'file' },
 ];
+
 
 interface FileTreeNodeProps {
   skill: Skill;
@@ -210,6 +210,8 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
   const [githubConnected, setGithubConnected] = useState(false);
   const [githubUser, setGithubUser] = useState<{ login: string; avatar_url: string; name?: string } | null>(null);
   const [selectedConnector, setSelectedConnector] = useState<'github' | 'gdrive'>('github');
+  const [showDirectoryModal, setShowDirectoryModal] = useState(false);
+  const [initialDirectorySection, setInitialDirectorySection] = useState<DirectorySection>('connectors');
 
   useEffect(() => {
     getGithubStatus().then(data => {
@@ -417,6 +419,22 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
     setEditName('');
     setEditDesc('');
     setEditContent('');
+  };
+
+  const openDirectory = (section: DirectorySection) => {
+    setInitialDirectorySection(section);
+    setShowDirectoryModal(true);
+  };
+
+  const openConnectorFromDirectory = (connector: ConnectorAction) => {
+    setSelectedConnector(connector);
+    setTab('connectors');
+    setShowDirectoryModal(false);
+  };
+
+  const openSkillsFromDirectory = () => {
+    setTab('skills');
+    setShowDirectoryModal(false);
   };
 
   // Filter skills
@@ -659,49 +677,57 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
       {/* 3. Right Column: Detail / Create / Overview */}
       <div className="flex-1 flex flex-col min-w-0">
         {tab === 'overview' ? (
-          <div className="flex flex-col items-center justify-center h-full max-w-2xl mx-auto px-6 py-12">
-            <div className="mb-6">
-              <img src={customizeMainImg} alt="Customize" className="w-[140px] h-auto dark:invert opacity-90" />
-            </div>
-            <div className="text-center mb-12">
-              <h2 className="text-xl font-medium text-claude-text mb-2">Customize and manage the context and tools you are giving Claude.</h2>
-            </div>
+          <div className="flex h-full flex-col items-center overflow-y-auto bg-claude-bg">
+            <div className="mx-auto flex w-full max-w-[560px] flex-col items-center px-6 pb-24 pt-[14vh] lg:pt-[220px]">
+              <div className="mb-4 flex h-[96px] w-[96px] items-center justify-center">
+                <img src={customizeMainImg} alt="Customize" className="w-[96px] h-auto dark:invert opacity-90" />
+              </div>
 
-            <div className="w-full space-y-4">
-              <button
-                onClick={() => setTab('connectors')}
-                className="w-full flex items-center p-4 border border-claude-border bg-black/[0.02] dark:bg-white/[0.04] rounded-[24px] hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors text-left group"
-              >
-                <div className="w-11 h-11 rounded-xl bg-claude-bg/50 border border-claude-border flex items-center justify-center mr-4 group-hover:border-claude-textSecondary/30 transition-colors">
-                  <img src={connectorsImg} className="w-7 h-7 dark:invert opacity-70" alt="Connectors" />
-                </div>
-                <div>
-                  <div className="font-medium text-claude-text text-[15.5px]">Connect your apps</div>
-                  <div className="text-sm text-claude-textSecondary">Integrate with the tools you use to complete your tasks</div>
-                </div>
-                <div className="ml-auto pr-2">
-                  <ArrowLeft size={16} className="rotate-180 text-claude-textSecondary" />
-                </div>
-              </button>
+              <div className="mb-10 text-center">
+                <h2 className="font-serif text-[29px] font-medium leading-[1.15] text-claude-text">Customize Claude</h2>
+                <p className="mt-2 text-[14px] leading-5 text-claude-textSecondary">
+                  Skills, connectors, and plugins shape how Claude works with you.
+                </p>
+              </div>
 
-              <button
-                onClick={() => {
-                  setTab('skills');
-                  startCreate();
-                }}
-                className="w-full flex items-center p-4 border border-claude-border bg-black/[0.02] dark:bg-white/[0.04] rounded-[24px] hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors text-left group"
-              >
-                <div className="w-11 h-11 rounded-xl bg-claude-bg/50 border border-claude-border flex items-center justify-center mr-4 group-hover:border-claude-textSecondary/30 transition-colors">
-                  <img src={createSkillsImg} className="w-7 h-7 dark:invert opacity-70" alt="Skills" />
-                </div>
-                <div>
-                  <div className="font-medium text-claude-text text-[15.5px]">Create new skills</div>
-                  <div className="text-sm text-claude-textSecondary">Teach Claude your processes, team norms, and expertise</div>
-                </div>
-                <div className="ml-auto pr-2">
-                  <ArrowLeft size={16} className="rotate-180 text-claude-textSecondary" />
-                </div>
-              </button>
+              <div className="w-full space-y-3">
+                <button
+                  onClick={() => openDirectory('connectors')}
+                  className="w-full rounded-[24px] border border-claude-border bg-white px-5 py-[21px] text-left shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-colors hover:bg-[#fcfcfb] dark:bg-[#30302E] dark:hover:bg-[#353533]"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-claude-hover">
+                      <img src={connectorsImg} className="h-5 w-5 dark:invert opacity-80" alt="Connectors" />
+                    </div>
+                    <div>
+                      <div className="text-[15px] font-medium text-claude-text">Connect your apps</div>
+                      <div className="mt-0.5 text-[13.5px] leading-5 text-claude-textSecondary">
+                        Let Claude read and write to the tools you already use.
+                      </div>
+                    </div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setTab('skills');
+                    startCreate();
+                  }}
+                  className="w-full rounded-[24px] border border-claude-border bg-white px-5 py-[21px] text-left shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-colors hover:bg-[#fcfcfb] dark:bg-[#30302E] dark:hover:bg-[#353533]"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-claude-hover">
+                      <img src={createSkillsImg} className="h-5 w-5 dark:invert opacity-80" alt="Skills" />
+                    </div>
+                    <div>
+                      <div className="text-[15px] font-medium text-claude-text">Create new skills</div>
+                      <div className="mt-0.5 text-[13.5px] leading-5 text-claude-textSecondary">
+                        Teach Claude your processes, team norms, and expertise.
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              </div>
             </div>
           </div>
         ) : tab === 'connectors' ? (
@@ -891,6 +917,16 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
         )}
       </div>
 
+      {showDirectoryModal && (
+        <DirectoryModal
+          initialSection={initialDirectorySection}
+          isGithubConnected={githubConnected}
+          onClose={() => setShowDirectoryModal(false)}
+          onOpenConnector={openConnectorFromDirectory}
+          onOpenSkills={openSkillsFromDirectory}
+        />
+      )}
+
       {showUploadModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-claude-bg w-[460px] rounded-[16px] flex flex-col shadow-[0_10px_40px_rgba(0,0,0,0.25)] dark:shadow-[0_10px_40px_rgba(0,0,0,0.5)] relative border border-claude-border overflow-hidden">
@@ -905,7 +941,7 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
               const file = e.target.files?.[0];
               if (!file) return;
               setUploadErr(''); setUploading(true);
-              try { await importSkill(file); setShowUploadModal(false); const list = await getSkills(); setSkills(list); }
+              try { await importSkill(file); setShowUploadModal(false); await fetchList(); }
               catch (err: any) { setUploadErr(err.message || '导入失败'); }
               finally { setUploading(false); if (uploadFileRef.current) uploadFileRef.current.value = ''; }
             }} />
@@ -919,7 +955,7 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
                 const file = e.dataTransfer.files?.[0];
                 if (!file) return;
                 setUploadErr(''); setUploading(true);
-                try { await importSkill(file); setShowUploadModal(false); const list = await getSkills(); setSkills(list); }
+                try { await importSkill(file); setShowUploadModal(false); await fetchList(); }
                 catch (err: any) { setUploadErr(err.message || '导入失败'); }
                 finally { setUploading(false); }
               }}

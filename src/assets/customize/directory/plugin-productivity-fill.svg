@@ -1,0 +1,32 @@
+<svg preserveAspectRatio="none" width="100%" height="100%" overflow="visible" style="display: block;" viewBox="0 0 20.8 25.6" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Group">
+<g id="Group_2" filter="url(#filter0_d_0_4)">
+<path id="Vector" d="M16.8 23.2H4C2.67448 23.2 1.6 22.1256 1.6 20.8V3.20001C1.6 1.87441 2.67448 0.800006 4 0.800006H13.3334L19.2 6.8472V20.8C19.2 22.1256 18.1255 23.2 16.8 23.2Z" fill="var(--fill-0, white)"/>
+<path id="Vector_2" d="M4 1.2H13.1633L18.8 7.00879V20.8C18.8 21.9048 17.9046 22.8 16.8 22.8H4C2.89544 22.8 2 21.9048 2 20.8V3.2C2 2.0952 2.89544 1.2 4 1.2Z" stroke="var(--stroke-0, #BCBBBB)" stroke-width="0.8"/>
+</g>
+<path id="Vector_3" d="M6.4 17.2H4.8C4.57909 17.2 4.4 17.3791 4.4 17.6V19.2C4.4 19.4209 4.57909 19.6 4.8 19.6H6.4C6.62091 19.6 6.8 19.4209 6.8 19.2V17.6C6.8 17.3791 6.62091 17.2 6.4 17.2Z" fill="var(--fill-0, #F0EEE6)" stroke="var(--stroke-0, #BCBBBB)" stroke-width="0.8"/>
+<path id="Vector_4" d="M6.4 12.4H4.8C4.57909 12.4 4.4 12.5791 4.4 12.8V14.4C4.4 14.6209 4.57909 14.8 4.8 14.8H6.4C6.62091 14.8 6.8 14.6209 6.8 14.4V12.8C6.8 12.5791 6.62091 12.4 6.4 12.4Z" fill="var(--fill-0, #F0EEE6)" stroke="var(--stroke-0, #BCBBBB)" stroke-width="0.8"/>
+<path id="Vector_5" d="M4 5.5L4.83632 6.1896C4.98416 6.312 5.19768 6.312 5.34544 6.1896L8 4" stroke="var(--stroke-0, #BCBBBB)" stroke-width="0.8" stroke-linecap="round"/>
+<path id="Vector_6" d="M4 9.5L4.83632 10.1896C4.98416 10.312 5.19768 10.312 5.34544 10.1896L8 8" stroke="var(--stroke-0, #BCBBBB)" stroke-width="0.8" stroke-linecap="round"/>
+<g id="Group_3" opacity="0.7">
+<path id="Vector_7" d="M8.8 13.596C9.1968 13.596 9.54624 13.2816 9.75064 12.804C9.95496 13.2816 10.3045 13.596 10.7013 13.596C11.0981 13.596 11.4475 13.2816 11.6519 12.804C11.8562 13.2816 12.2058 13.596 12.6025 13.596C12.9993 13.596 13.3488 13.2816 13.5531 12.804" stroke="var(--stroke-0, #A4A4A1)" stroke-width="0.486098" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="Vector_8" d="M13.5531 12.804C13.7575 13.2816 14.107 13.596 14.5038 13.596C14.9006 13.596 15.25 13.2816 15.4544 12.804C15.6588 13.2816 16.0082 13.596 16.405 13.596C16.8018 13.596 17.1513 13.2816 17.3557 12.804" stroke="var(--stroke-0, #A4A4A1)" stroke-width="0.486098" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+<g id="Group_4" opacity="0.7">
+<path id="Vector_9" d="M8.8 18.396C9.1968 18.396 9.54624 18.0816 9.75064 17.604C9.95496 18.0816 10.3045 18.396 10.7013 18.396C11.0981 18.396 11.4475 18.0816 11.6519 17.604C11.8562 18.0816 12.2058 18.396 12.6025 18.396C12.9993 18.396 13.3488 18.0816 13.5531 17.604" stroke="var(--stroke-0, #A4A4A1)" stroke-width="0.486098" stroke-linecap="round" stroke-linejoin="round"/>
+<path id="Vector_10" d="M13.5531 17.604C13.7575 18.0816 14.107 18.396 14.5038 18.396C14.9006 18.396 15.25 18.0816 15.4544 17.604C15.6588 18.0816 16.0082 18.396 16.405 18.396C16.8018 18.396 17.1513 18.0816 17.3557 17.604" stroke="var(--stroke-0, #A4A4A1)" stroke-width="0.486098" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+</g>
+<defs>
+<filter id="filter0_d_0_4" x="-2.98023e-08" y="2.98023e-08" width="20.8" height="25.6" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<feFlood flood-opacity="0" result="BackgroundImageFix"/>
+<feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+<feOffset dy="0.8"/>
+<feGaussianBlur stdDeviation="0.8"/>
+<feComposite in2="hardAlpha" operator="out"/>
+<feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.05 0"/>
+<feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_0_4"/>
+<feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_0_4" result="shape"/>
+</filter>
+</defs>
+</svg>
