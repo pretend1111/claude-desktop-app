@@ -1,0 +1,6 @@
+580:                                 className={`flex items-center justify-between px-3 py-2 transition-colors ${tc.result ? 'cursor-pointer hover:bg-black/5 dark:hover:bg-white/5' : ''}`}
+582:                                   if (!tc.result) return;
+606:                                   {realStatus !== 'running' && tc.result && (
+611:                               {tc.result && realStatus !== 'running' && (tc.isExpanded ?? false) && (
+613:                                   {typeof tc.result === 'string' ? (tc.result.length > 2000 ? tc.result.slice(0, 2000) + '...' : tc.result) : JSON.stringify(tc.result).slice(0, 2000)}
+1725:               tc.result = toolEvent.content;

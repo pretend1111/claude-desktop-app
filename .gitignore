@@ -1,0 +1,30 @@
+# Local IDE / MCP machine config
+.cursor/
+
+# Local dependencies and extracted artifacts
+node_modules/
+temp_asar_extract/
+temp_codex_asar_extract/
+temp_codex_rebuild/
+*.vsix
+
+# Local design exports and scratch assets
+.tmp_figma_assets/
+figma_nodes_raw.json
+figma-svg-replacements/
+public/figma/
+codex-composer-preview.html
+download_chesspnt.js
+parse_figma.py
+chesspnt_source.html
+
+# Sensitive local backup files
+Claudedesktop/electron/*.bak
+claude-desktop-app-main/electron/*.bak
+
+# Duplicate / sandboxed app copies
+claude-desktop-app-main/
+
+# Local one-off refactor helpers
+Claudedesktop/refactor.cjs
+Claudedesktop/refactor.js

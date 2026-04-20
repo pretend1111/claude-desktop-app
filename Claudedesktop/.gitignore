@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+release/
+
+# Installer artifacts
+*.exe
+*.blockmap
+latest.yml
+
+# Logs
+*.log
+frontend-error.log
+
+# Runtime data
+.api_history.json
+
+# Environment
+.env
+.env.local
+*.local
+
+# Build-time secrets (populated by CI from GitHub Actions secrets, never committed)
+electron/secrets.json
+
+# Engine dependencies (install separately with: cd engine && bun install)
+engine/node_modules/
+# engine/.env is committed (no secrets, only public config)
+engine/bun.lockb
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/

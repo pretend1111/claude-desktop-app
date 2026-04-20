@@ -1,0 +1,105 @@
+.pill-nav-root {
+  position: relative;
+  width: max-content;
+}
+
+.pill-nav-track {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pill-gap, 6px);
+  min-height: var(--pill-track-height, 47px);
+}
+
+.pill-nav-indicator {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 10px;
+  background: var(--pill-indicator-bg, #f1efea);
+  box-shadow:
+    0 1px 2px rgba(17, 17, 17, 0.06),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.42);
+  pointer-events: none;
+  opacity: 0;
+  z-index: 0;
+}
+
+.pill-nav-button {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  height: var(--pill-height, 39px);
+  padding: 0 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--pill-text-color, #605e5a);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    color 180ms ease,
+    opacity 180ms ease,
+    gap 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.pill-nav-button:hover:not(:disabled) {
+  color: var(--pill-active-text-color, #373734);
+}
+
+.pill-nav-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.pill-nav-button.is-active {
+  gap: 8px;
+  color: var(--pill-active-text-color, #373734);
+}
+
+.pill-nav-icon-slot {
+  display: inline-flex;
+  height: 20px;
+  width: 20px;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.pill-nav-icon {
+  display: block;
+  object-fit: contain;
+  transition:
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.pill-nav-button.is-active .pill-nav-icon {
+  transform: translateX(0);
+}
+
+.pill-nav-label {
+  display: inline-block;
+  overflow: hidden;
+  max-width: 0;
+  opacity: 0;
+  transform: translateX(-4px);
+  font-family: "Anthropic Sans", "Figtree", sans-serif;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+  letter-spacing: -0.1504px;
+  transition:
+    max-width 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 140ms ease,
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.pill-nav-button.is-active .pill-nav-label {
+  max-width: var(--pill-label-max, 64px);
+  opacity: 1;
+  transform: translateX(0);
+}
