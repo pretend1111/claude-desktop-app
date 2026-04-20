@@ -7,6 +7,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
   return {
     base: './', // Use relative paths for Electron file:// protocol
+    assetsInclude: ['**/*.lottie'],
     server: {
       port: 3000,
       host: '::',

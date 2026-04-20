@@ -8,6 +8,35 @@ const { v4: uuidv4 } = require('uuid');
 const { app } = require('electron');
 const { TOOL_DEFINITIONS, executeTool } = require('./tools.cjs');
 const { runResearchPipeline } = require('./research-orchestrator.cjs');
+const { resolveRequestedModelForMode } = require('./chat-config.cjs');
+const {
+    getInstallProfile,
+    getGlobalConfigFilePath,
+    getManagedConnectorStatuses,
+    mergeMcpServerConfig,
+    removeMcpServerConfig,
+} = require('./connector-mcp-config.cjs');
+const {
+    buildComposioServerConfig,
+    createComposioLink,
+    createComposioSession,
+    getComposioConnectorStatuses,
+    getComposioProfile,
+    getComposioSession,
+    getComposioToolkits,
+    getStoredComposioSession,
+    hasInstalledComposioServer,
+    listComposioToolkitSlugs,
+    readComposioSessionStore,
+    upsertStoredComposioSession,
+    writeComposioSessionStore,
+    COMPOSIO_SERVER_NAME,
+} = require('./connector-composio.cjs');
+const {
+    readComposioConfig,
+    writeComposioConfig,
+    getResolvedComposioApiKey,
+} = require('./connector-composio-config.cjs');
 
 // Heuristic: when research_mode is enabled, decide whether THIS message
 // should actually trigger the research pipeline. Greetings, very short
@@ -49,6 +78,7 @@ try {
 
 function initServer(mainWindow) {
     const server = express();
+    const userDataPath = app.getPath('userData');
 
     // ── Origin 白名单 (安全关键) ──────────────────────────────
     // bridge-server 监听 127.0.0.1:30080 — 默认情况下任何用户访问的恶意网页都能
@@ -76,6 +106,126 @@ function initServer(mainWindow) {
         credentials: false,
     }));
     server.use(express.json({ limit: '5mb' }));
+
+    function readJsonConfig(configPath) {
+        try {
+            if (!fs.existsSync(configPath)) {
+                return {};
+            }
+            const raw = fs.readFileSync(configPath, 'utf8');
+            const parsed = raw ? JSON.parse(raw) : {};
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch (error) {
+            throw new Error(`Failed to read config at ${configPath}: ${error.message}`);
+        }
+    }
+
+    function readConnectorGlobalConfig() {
+        const configPath = getGlobalConfigFilePath();
+        return {
+            configPath,
+            config: readJsonConfig(configPath),
+        };
+    }
+
+    function writeConnectorGlobalConfig(config) {
+        const configPath = getGlobalConfigFilePath();
+        const parentDir = path.dirname(configPath);
+        fs.mkdirSync(parentDir, { recursive: true });
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+        return configPath;
+    }
+
+    const composioConfigPath = path.join(userDataPath, 'connector-composio.json');
+    const composioSessionsPath = path.join(userDataPath, 'connector-composio-sessions.json');
+
+    function readStoredComposioConfig() {
+        return readComposioConfig(composioConfigPath);
+    }
+
+    function getComposioApiKey() {
+        return getResolvedComposioApiKey({
+            config: readStoredComposioConfig(),
+            env: process.env,
+        });
+    }
+
+    function readComposioSessions() {
+        return readComposioSessionStore(composioSessionsPath);
+    }
+
+    function writeComposioSessions(store) {
+        writeComposioSessionStore(composioSessionsPath, store);
+    }
+
+    async function ensureComposioSession(userId) {
+        const apiKey = getComposioApiKey();
+        if (!apiKey) {
+            throw new Error('Composio API key is not configured');
+        }
+
+        const normalizedUserId = String(userId || '').trim();
+        if (!normalizedUserId) {
+            throw new Error('A stable userId is required for Composio connectors');
+        }
+
+        const store = readComposioSessions();
+        const stored = getStoredComposioSession(store, normalizedUserId);
+
+        if (stored?.sessionId) {
+            try {
+                const existing = await getComposioSession({
+                    apiKey,
+                    sessionId: stored.sessionId,
+                });
+                const nextStore = upsertStoredComposioSession(store, normalizedUserId, existing);
+                writeComposioSessions(nextStore);
+                return existing;
+            } catch (error) {
+                if (error?.status && error.status !== 404) {
+                    throw error;
+                }
+            }
+        }
+
+        const created = await createComposioSession({
+            apiKey,
+            toolkitSlugs: listComposioToolkitSlugs(),
+            userId: normalizedUserId,
+        });
+
+        const nextStore = upsertStoredComposioSession(store, normalizedUserId, created);
+        writeComposioSessions(nextStore);
+        return created;
+    }
+
+    async function buildComposioStatusPayload(userId) {
+        const { configPath, config } = readConnectorGlobalConfig();
+        const apiKey = getComposioApiKey();
+        const normalizedUserId = String(userId || '').trim();
+        const session = apiKey && normalizedUserId ? await ensureComposioSession(normalizedUserId) : null;
+        const toolkitItems =
+            apiKey && session?.sessionId
+                ? await getComposioToolkits({
+                    apiKey,
+                    sessionId: session.sessionId,
+                    toolkitSlugs: listComposioToolkitSlugs(),
+                })
+                : [];
+        const connectors = getComposioConnectorStatuses({
+            config,
+            toolkitItems,
+        });
+
+        return {
+            configPath,
+            configured: Boolean(apiKey),
+            connectors,
+            mcpUrl: session?.mcpUrl || null,
+            serverInstalled: hasInstalledComposioServer(config),
+            sessionId: session?.sessionId || null,
+        };
+    }
 
     // Track active engine child processes per conversation (for stdin writes like AskUserQuestion)
     const activeChildren = new Map();
@@ -204,7 +354,6 @@ function initServer(mainWindow) {
     }
 
     // Setup paths
-    const userDataPath = app.getPath('userData');
     const dbPath = path.join(userDataPath, 'claude-desktop.json');
 
     // Workspace: use user-chosen path, or default to ~/Documents/Claude Desktop
@@ -2023,6 +2172,7 @@ function initServer(mainWindow) {
             if (!p.enabled) continue;
             for (const m of (p.models || [])) {
                 if (m.enabled === false) continue;
+                if (!m.id || !String(m.id).trim()) continue;
                 models.push({ id: m.id, name: m.name || m.id, providerId: p.id, providerName: p.name });
             }
         }
@@ -2275,6 +2425,233 @@ function initServer(mainWindow) {
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
+    });
+
+    server.get('/api/connectors/mcp-status', (req, res) => {
+        try {
+            const { configPath, config } = readConnectorGlobalConfig();
+            res.json({
+                configPath,
+                connectors: getManagedConnectorStatuses(config),
+            });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    server.get('/api/connectors/composio-config', (req, res) => {
+        try {
+            const storedConfig = readStoredComposioConfig();
+            const apiKey = getComposioApiKey();
+            const source = storedConfig.apiKey
+                ? 'local'
+                : process.env.COMPOSIO_API_KEY || process.env.COMPOSIO_PROJECT_API_KEY
+                    ? 'env'
+                    : null;
+
+            res.json({
+                configPath: composioConfigPath,
+                configured: Boolean(apiKey),
+                hasStoredApiKey: Boolean(storedConfig.apiKey),
+                source,
+            });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    server.post('/api/connectors/composio-config', (req, res) => {
+        try {
+            const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+            if (!apiKey) {
+                return res.status(400).json({ error: 'Missing Composio API key' });
+            }
+
+            writeComposioConfig(composioConfigPath, { apiKey });
+            res.json({
+                ok: true,
+                configPath: composioConfigPath,
+                configured: true,
+                hasStoredApiKey: true,
+                source: 'local',
+            });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    server.post('/api/connectors/mcp-install', (req, res) => {
+        const { connectorId } = req.body || {};
+        const profile = getInstallProfile(connectorId);
+        if (!profile) {
+            return res.status(400).json({ error: 'Connector does not support in-app MCP installation' });
+        }
+
+        try {
+            const { config } = readConnectorGlobalConfig();
+            const nextConfig = mergeMcpServerConfig(config, profile.serverName, profile.serverConfig);
+            const configPath = writeConnectorGlobalConfig(nextConfig);
+            res.json({
+                ok: true,
+                configPath,
+                connectors: getManagedConnectorStatuses(nextConfig),
+                serverName: profile.serverName,
+            });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    server.post('/api/connectors/mcp-uninstall', (req, res) => {
+        const { connectorId } = req.body || {};
+        const profile = getInstallProfile(connectorId);
+        if (!profile) {
+            return res.status(400).json({ error: 'Connector does not support in-app MCP removal' });
+        }
+
+        try {
+            const { config } = readConnectorGlobalConfig();
+            const nextConfig = removeMcpServerConfig(config, profile.serverName);
+            const configPath = writeConnectorGlobalConfig(nextConfig);
+            res.json({
+                ok: true,
+                configPath,
+                connectors: getManagedConnectorStatuses(nextConfig),
+                serverName: profile.serverName,
+            });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    server.get('/api/connectors/composio-status', async (req, res) => {
+        try {
+            const payload = await buildComposioStatusPayload(req.query.userId);
+            res.json(payload);
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    server.post('/api/connectors/composio-connect', async (req, res) => {
+        const { connectorId, userId } = req.body || {};
+        const profile = getComposioProfile(connectorId);
+        if (!profile) {
+            return res.status(400).json({ error: 'Connector is not mapped to a Composio toolkit yet' });
+        }
+
+        try {
+            const apiKey = getComposioApiKey();
+            if (!apiKey) {
+                return res.status(400).json({ error: 'Composio API key is not configured in this app' });
+            }
+
+            const session = await ensureComposioSession(userId);
+            const { config } = readConnectorGlobalConfig();
+            const nextConfig = mergeMcpServerConfig(
+                config,
+                COMPOSIO_SERVER_NAME,
+                buildComposioServerConfig({
+                    apiKey,
+                    sessionUrl: session.mcpUrl,
+                }),
+            );
+            const configPath = writeConnectorGlobalConfig(nextConfig);
+            const callbackUrl = `http://127.0.0.1:30080/api/connectors/composio/callback?connectorId=${encodeURIComponent(connectorId)}`;
+            const link = await createComposioLink({
+                alias: connectorId,
+                apiKey,
+                callbackUrl,
+                sessionId: session.sessionId,
+                toolkitSlug: profile.toolkitSlug,
+            });
+            const payload = await buildComposioStatusPayload(userId);
+
+            res.json({
+                ok: true,
+                configPath,
+                connectors: payload.connectors,
+                mcpUrl: payload.mcpUrl,
+                redirectUrl: link.redirect_url,
+                serverName: COMPOSIO_SERVER_NAME,
+                sessionId: payload.sessionId,
+            });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    server.post('/api/connectors/composio-uninstall', async (req, res) => {
+        try {
+            const { userId } = req.body || {};
+            const { config } = readConnectorGlobalConfig();
+            const nextConfig = removeMcpServerConfig(config, COMPOSIO_SERVER_NAME);
+            const configPath = writeConnectorGlobalConfig(nextConfig);
+            const payload = await buildComposioStatusPayload(userId);
+
+            res.json({
+                ok: true,
+                configPath,
+                connectors: payload.connectors,
+                serverName: COMPOSIO_SERVER_NAME,
+            });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    server.get('/api/connectors/composio/callback', (req, res) => {
+        const connectorId = String(req.query.connectorId || 'connector');
+        const status = String(req.query.status || 'success');
+        const isSuccess = status === 'success';
+        const title = isSuccess ? 'Connector ready' : 'Connection incomplete';
+        const body = isSuccess
+            ? `You can return to Claude Desktop now. ${connectorId} was handed off to Composio for authentication.`
+            : `Composio reported that the ${connectorId} connection did not finish cleanly. Return to Claude Desktop to retry.`;
+
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.end(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${title}</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #f5f4ef;
+        color: #121212;
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      main {
+        max-width: 460px;
+        padding: 32px 28px;
+        border-radius: 20px;
+        border: 1px solid rgba(18, 18, 18, 0.08);
+        background: white;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.08);
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 22px;
+        line-height: 1.2;
+      }
+      p {
+        margin: 0;
+        color: #5f5b52;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>${title}</h1>
+      <p>${body}</p>
+    </main>
+  </body>
+</html>`);
     });
 
     // ===== Skills =====
@@ -3341,17 +3718,22 @@ You have the following skills available. When a user's request matches a skill's
     }
     function resolveChatConfig(conv, user_mode, env_token, env_base_url) {
         const rawModel = conv.model || 'claude-sonnet-4-6';
-        let modelId = rawModel.replace(/-thinking$/, '');
-        // Clawparrot only routes through the Anthropic gateway — if the stored
-        // conv.model is a selfhosted leftover (e.g. minimax / qwen / glm), the
-        // gateway would still accept the request but bill it against the wrong
-        // tier and return confusing results. Force a sane Claude fallback and
-        // leave a loud log so we can trace stale convs.
-        if (user_mode === 'clawparrot' && !/^claude-/i.test(modelId)) {
-            console.warn('[Chat] Non-Claude model', modelId, 'detected under clawparrot mode — falling back to claude-sonnet-4-6 (conv model leaked from selfhosted?)');
-            modelId = 'claude-sonnet-4-6';
+        const requestedModelId = rawModel.replace(/-thinking$/, '');
+        const effectiveUserMode = user_mode === 'selfhosted' ? 'selfhosted' : 'clawparrot';
+        const initialProvider = effectiveUserMode === 'selfhosted' ? resolveProvider(requestedModelId) : null;
+        const routed = resolveRequestedModelForMode({
+            modelId: requestedModelId,
+            userMode: effectiveUserMode,
+            hasProvider: !!initialProvider,
+        });
+        let modelId = routed.modelId;
+        if (routed.fallbackApplied) {
+            console.warn('[Chat] Non-Claude model', requestedModelId, 'detected under clawparrot mode — falling back to', modelId);
         }
-        const provider = user_mode === 'selfhosted' ? resolveProvider(modelId) : null;
+        if (routed.error) {
+            throw new Error(routed.error);
+        }
+        const provider = effectiveUserMode === 'selfhosted' ? resolveProvider(modelId) : null;
         let apiKey, baseUrl, apiFormat = 'anthropic';
         let supportsWebSearch = false;
         let webSearchStrategy = null;
@@ -3611,7 +3993,23 @@ You have the following skills available. When a user's request matches a skill's
                 console.log('[EnginePool] Engine init event for', convId);
                 return;
             }
-            if (evt.type === 'result') { if (engine.turn) { if (!engine.turn.assistantText && evt.result) engine.turn.assistantText = typeof evt.result === 'string' ? evt.result : ''; finishTurn(engine, convId, conv); } return; }
+            if (evt.type === 'result') {
+                if (engine.turn) {
+                    if (!engine.turn.assistantText && evt.result) {
+                        engine.turn.assistantText = typeof evt.result === 'string' ? evt.result : '';
+                    }
+                    if (!engine.turn.assistantText && !engine.turn.thinkingText && engine.turn.toolCalls.size === 0) {
+                        try {
+                            engine.turn.sendSSE({
+                                type: 'error',
+                                error: 'Model returned no content. Please check the selected model and provider configuration.',
+                            });
+                        } catch (_) {}
+                    }
+                    finishTurn(engine, convId, conv);
+                }
+                return;
+            }
             if (!engine.turn) return;
             handleTurnEvent(engine, convId, conv, evt);
         };
@@ -3669,7 +4067,12 @@ You have the following skills available. When a user's request matches a skill's
         const conv = db.conversations.find(c => c.id === convId);
         if (!conv) return res.status(404).json({ error: 'Not found' });
         const { env_token, env_base_url, user_mode, user_profile } = req.body || {};
-        const config = resolveChatConfig(conv, user_mode, env_token, env_base_url);
+        let config;
+        try {
+            config = resolveChatConfig(conv, user_mode, env_token, env_base_url);
+        } catch (err) {
+            return res.status(400).json({ error: err.message || 'Invalid chat config' });
+        }
         const sysPrompt = buildChatSystemPrompt(conv, user_mode, user_profile);
         console.log('[EnginePool] Pre-warming engine for', convId, 'model=' + config.modelId);
         spawnPersistentEngine(convId, conv, { ...config, sysPrompt });
@@ -3980,4 +4383,3 @@ You have the following skills available. When a user's request matches a skill's
 }
 
 module.exports = { initServer, enableNodeModeForChildProcesses };
-

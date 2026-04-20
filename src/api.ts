@@ -742,6 +742,111 @@ export async function getStreamStatus(conversationId: string): Promise<{ active:
   return res.json();
 }
 
+export interface ConnectorMcpStatus {
+  installed: boolean;
+  serverName: string;
+}
+
+export interface ConnectorMcpStatusResponse {
+  configPath: string | null;
+  connectors: Record<string, ConnectorMcpStatus>;
+}
+
+export interface ConnectorComposioStatus {
+  available: boolean;
+  connected: boolean;
+  connectedAccountId: string | null;
+  installed: boolean;
+  serverName: string | null;
+  toolkitSlug: string | null;
+}
+
+export interface ConnectorComposioStatusResponse {
+  configPath: string | null;
+  configured: boolean;
+  connectors: Record<string, ConnectorComposioStatus>;
+  mcpUrl: string | null;
+  serverInstalled: boolean;
+  sessionId: string | null;
+}
+
+export async function getConnectorMcpStatus(): Promise<ConnectorMcpStatusResponse> {
+  const res = await fetch(`${API_BASE}/connectors/mcp-status`);
+  if (!res.ok) throw new Error('Failed to load connector MCP status');
+  return res.json();
+}
+
+export async function installConnectorMcp(connectorId: string): Promise<ConnectorMcpStatusResponse> {
+  const res = await fetch(`${API_BASE}/connectors/mcp-install`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ connectorId }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to install connector');
+  }
+  return res.json();
+}
+
+export async function uninstallConnectorMcp(connectorId: string): Promise<ConnectorMcpStatusResponse> {
+  const res = await fetch(`${API_BASE}/connectors/mcp-uninstall`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ connectorId }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to uninstall connector');
+  }
+  return res.json();
+}
+
+export async function getConnectorComposioStatus(userId: string): Promise<ConnectorComposioStatusResponse> {
+  const url = new URL(`${API_BASE}/connectors/composio-status`);
+  if (userId) {
+    url.searchParams.set('userId', userId);
+  }
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to load Composio connector status');
+  }
+  return res.json();
+}
+
+export async function connectConnectorViaComposio(
+  connectorId: string,
+  userId: string,
+): Promise<ConnectorComposioStatusResponse & { redirectUrl: string; serverName: string }> {
+  const res = await fetch(`${API_BASE}/connectors/composio-connect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ connectorId, userId }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to connect connector with Composio');
+  }
+  return res.json();
+}
+
+export async function uninstallConnectorComposio(
+  userId: string,
+): Promise<ConnectorComposioStatusResponse & { serverName: string }> {
+  const res = await fetch(`${API_BASE}/connectors/composio-uninstall`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to remove Composio connector server');
+  }
+  return res.json();
+}
+
 // Reconnect to an active stream — receives buffered + live SSE events
 export function reconnectStream(
   conversationId: string,

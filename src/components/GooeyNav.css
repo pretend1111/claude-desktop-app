@@ -1,0 +1,263 @@
+:root {
+  --linear-ease: linear(
+    0,
+    0.068,
+    0.19 2.7%,
+    0.804 8.1%,
+    1.037,
+    1.199 13.2%,
+    1.245,
+    1.27 15.8%,
+    1.274,
+    1.272 17.4%,
+    1.249 19.1%,
+    0.996 28%,
+    0.949,
+    0.928 33.3%,
+    0.926,
+    0.933 36.8%,
+    1.001 45.6%,
+    1.013,
+    1.019 50.8%,
+    1.018 54.4%,
+    1 63.1%,
+    0.995 68%,
+    1.001 85%,
+    1
+  );
+}
+
+.gooey-nav-container {
+  position: relative;
+  width: 188px;
+  height: 66px;
+  --gooey-color-1: rgba(243, 244, 241, 0.98);
+  --gooey-color-2: rgba(247, 246, 243, 0.88);
+  --gooey-color-3: rgba(235, 231, 223, 0.72);
+  --gooey-color-4: rgba(255, 255, 255, 0.92);
+}
+
+.gooey-nav-nav {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform: translate3d(0, 0, 0.01px);
+  z-index: 3;
+}
+
+.gooey-nav-items {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.gooey-nav-item {
+  position: absolute;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  padding: 0;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  transition:
+    transform 0.22s ease,
+    opacity 0.2s ease;
+  color: #585857;
+}
+
+.gooey-nav-item:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.gooey-nav-item:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+.gooey-nav-item:focus-visible {
+  outline: 2px solid rgba(89, 116, 255, 0.18);
+  outline-offset: 2px;
+}
+
+.gooey-nav-icon {
+  position: absolute;
+  display: block;
+  object-fit: contain;
+}
+
+.gooey-nav-container .effect {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  opacity: 1;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.gooey-nav-container .effect.text {
+  display: flex;
+  align-items: center;
+  color: #585857;
+  font-family: "Anthropic Sans", "Figtree", sans-serif;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+  letter-spacing: -0.1504px;
+  transition:
+    left 0.3s var(--linear-ease),
+    top 0.3s var(--linear-ease),
+    width 0.3s var(--linear-ease),
+    opacity 0.24s ease,
+    color 0.3s ease;
+  white-space: nowrap;
+  z-index: 4;
+}
+
+.gooey-nav-container .effect.text.active {
+  color: #585857;
+}
+
+.gooey-nav-container .effect.filter {
+  filter: blur(7px) contrast(22);
+  z-index: 1;
+  transition:
+    left 0.34s var(--linear-ease),
+    top 0.34s var(--linear-ease),
+    width 0.34s var(--linear-ease),
+    height 0.34s var(--linear-ease),
+    border-radius 0.34s var(--linear-ease),
+    opacity 0.2s ease;
+}
+
+.gooey-nav-container .effect.filter::before {
+  content: '';
+  position: absolute;
+  inset: -38px;
+  z-index: -2;
+  background: transparent;
+}
+
+.gooey-nav-container .effect.filter::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: #f3f4f1;
+  border: 1px solid rgba(236, 234, 230, 0.98);
+  box-shadow:
+    0 1px 2px rgba(33, 26, 19, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  transform: scale(0.88);
+  opacity: 0;
+  transition: none;
+}
+
+.gooey-nav-container .effect.filter.active::after {
+  animation: gooey-pill 0.34s var(--linear-ease) both;
+}
+
+.gooey-nav-container .effect.filter.is-immediate,
+.gooey-nav-container .effect.text.is-immediate {
+  transition: none;
+}
+
+@keyframes gooey-pill {
+  0% {
+    transform: scale(0.88);
+    opacity: 0.42;
+  }
+
+  65% {
+    transform: scale(1.02);
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.particle,
+.point {
+  display: block;
+  opacity: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  transform-origin: center;
+}
+
+.particle {
+  --time: 5s;
+  position: absolute;
+  top: calc(50% - 10px);
+  left: calc(50% - 10px);
+  animation: particle calc(var(--time)) ease 1 -350ms;
+}
+
+.point {
+  background: var(--color);
+  opacity: 1;
+  animation: point calc(var(--time)) ease 1 -350ms;
+}
+
+@keyframes particle {
+  0% {
+    transform: rotate(0deg) translate(var(--start-x), var(--start-y));
+    opacity: 1;
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+
+  70% {
+    transform: rotate(calc(var(--rotate) * 0.5)) translate(calc(var(--end-x) * 1.2), calc(var(--end-y) * 1.2));
+    opacity: 1;
+    animation-timing-function: ease;
+  }
+
+  85% {
+    transform: rotate(calc(var(--rotate) * 0.66)) translate(var(--end-x), var(--end-y));
+    opacity: 0.92;
+  }
+
+  100% {
+    transform: rotate(calc(var(--rotate) * 1.2)) translate(calc(var(--end-x) * 0.5), calc(var(--end-y) * 0.5));
+    opacity: 0;
+  }
+}
+
+@keyframes point {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+    animation-timing-function: cubic-bezier(0.55, 0, 1, 0.45);
+  }
+
+  25% {
+    transform: scale(calc(var(--scale) * 0.25));
+  }
+
+  38% {
+    opacity: 1;
+  }
+
+  65% {
+    transform: scale(var(--scale));
+    opacity: 0.92;
+    animation-timing-function: ease;
+  }
+
+  85% {
+    transform: scale(var(--scale));
+    opacity: 0.84;
+  }
+
+  100% {
+    transform: scale(0);
+    opacity: 0;
+  }
+}

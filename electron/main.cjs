@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, globalShortcut, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const archiver = require('archiver');
@@ -134,6 +134,23 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+    session.defaultSession.setPermissionCheckHandler((_webContents, permission, _origin, details) => {
+        if (permission === 'media') {
+            const mediaTypes = details?.mediaTypes || [];
+            return mediaTypes.includes('audio');
+        }
+        return false;
+    });
+
+    session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+        if (permission === 'media') {
+            const mediaTypes = details?.mediaTypes || [];
+            callback(mediaTypes.includes('audio'));
+            return;
+        }
+        callback(false);
+    });
+
     // macOS: clear quarantine flags on bundled bun binary. Downloaded .dmg/.zip
     // files get Apple's com.apple.quarantine xattr, and since our bun binary is
     // unsigned, Gatekeeper silently blocks execution — the engine subprocess just

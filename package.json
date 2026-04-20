@@ -1,7 +1,7 @@
 {
   "name": "claude-desktop",
   "private": true,
-  "version": "1.6.13",
+  "version": "1.6.12",
   "description": "Claude Desktop - AI assistant with native capabilities",
   "author": {
     "name": "pretend1111",
@@ -10,6 +10,8 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
+    "engine:install": "cd engine && bun install",
+    "postinstall": "npm run engine:install",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
@@ -35,7 +37,14 @@
       {
         "from": "engine/src",
         "to": "engine/src",
-        "filter": ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.json", "**/*.md", "**/*.txt"]
+        "filter": [
+          "**/*.ts",
+          "**/*.tsx",
+          "**/*.js",
+          "**/*.json",
+          "**/*.md",
+          "**/*.txt"
+        ]
       },
       {
         "from": "engine/bin",
@@ -91,7 +100,10 @@
         "zip"
       ],
       "icon": "public/icon-mac.png",
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Claude Desktop uses your microphone for voice dictation."
+      }
     },
     "linux": {
       "target": [
@@ -111,6 +123,7 @@
     "@fontsource-variable/figtree": "^5.2.10",
     "@fontsource-variable/source-serif-4": "^5.2.9",
     "@fontsource/spectral": "^5.2.8",
+    "@lottiefiles/dotlottie-react": "^0.19.0",
     "@remix-run/router": "1.15.3",
     "archiver": "^7.0.1",
     "core-util-is": "^1.0.3",
@@ -118,6 +131,7 @@
     "dotenv": "^17.3.1",
     "electron-updater": "^6.8.3",
     "express": "^5.2.1",
+    "gsap": "^3.15.0",
     "highlight.js": "^11.11.1",
     "inherits": "^2.0.4",
     "isarray": "^2.0.5",
@@ -129,7 +143,7 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-markdown": "9.0.1",
-    "react-router-dom": "6.22.3",
+    "react-router-dom": "^6.30.3",
     "react-syntax-highlighter": "^16.1.0",
     "recharts": "^3.7.0",
     "rehype-katex": "^7.0.1",

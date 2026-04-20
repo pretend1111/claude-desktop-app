@@ -128,7 +128,6 @@ cd claude-desktop-app
 
 # 装依赖
 npm install
-cd engine && bun install && cd ..
 
 # 运行
 npx vite build

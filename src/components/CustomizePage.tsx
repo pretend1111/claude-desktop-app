@@ -1,17 +1,47 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { flushSync } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import {
-  ArrowLeft, Plus, Search, Trash2, Sparkles, LayoutGrid, FileText,
+  ArrowLeft, Plus, Search, Trash2, Sparkles, FileText,
   ChevronRight, ChevronDown, Folder, File, MoreHorizontal, Info, Eye, Code,
-  Settings, Check, MessageSquare, ClipboardList, Upload, Github, X, FolderPlus
+  MessageSquare, ClipboardList, Upload, X, FolderPlus
 } from 'lucide-react';
 import MarkdownRenderer, { CodeBlock } from './MarkdownRenderer';
-import { getSkills, getSkillDetail, getSkillFile, createSkill, updateSkill, deleteSkill, toggleSkill, importSkill, getGithubStatus, getGithubAuthUrl, disconnectGithub } from '../api';
-import searchIconImg from '../assets/icons/search-icon.png';
+import DirectoryModal, { type DirectorySection } from './customize/DirectoryModal';
+import ConnectorDetailsPanel from './customize/ConnectorDetailsPanel';
+import ConnectorSidebar from './customize/ConnectorSidebar';
+import {
+  connectorCatalog,
+  getConnectorCatalogEntry,
+  getConnectorRuntimeStatus,
+  type ConnectorId,
+  type ConnectorRuntimeStatus,
+} from './customize/connectorCatalog';
+import type { DirectorySkillSummary } from './customize/directoryStore';
+import {
+  connectConnectorViaComposio,
+  disconnectGithub,
+  getSkills,
+  getSkillDetail,
+  getSkillFile,
+  createSkill,
+  updateSkill,
+  deleteSkill,
+  toggleSkill,
+  importSkill,
+  getGithubStatus,
+  getGithubAuthUrl,
+  getConnectorComposioStatus,
+  getConnectorMcpStatus,
+  getUser,
+  installConnectorMcp,
+  uninstallConnectorComposio,
+  uninstallConnectorMcp,
+  type ConnectorComposioStatus,
+  type ConnectorMcpStatus,
+} from '../api';
 import skillsImg from '../assets/icons/skills.png';
 import connectorsImg from '../assets/icons/connectors.png';
-import customizeIconImg from '../assets/icons/customize-icon.png';
 import customizeMainImg from '../assets/icons/customize-main.png';
 import createSkillsImg from '../assets/icons/create-skills.png';
 
@@ -69,6 +99,7 @@ const SKILL_CREATOR_FILES = [
   },
   { name: 'LICENSE.txt', type: 'file' },
 ];
+
 
 interface FileTreeNodeProps {
   skill: Skill;
@@ -209,7 +240,91 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
   // GitHub connector state
   const [githubConnected, setGithubConnected] = useState(false);
   const [githubUser, setGithubUser] = useState<{ login: string; avatar_url: string; name?: string } | null>(null);
-  const [selectedConnector, setSelectedConnector] = useState<'github' | 'gdrive'>('github');
+  const [selectedConnector, setSelectedConnector] = useState<ConnectorId>('github');
+  const [showDirectoryModal, setShowDirectoryModal] = useState(false);
+  const [initialDirectorySection, setInitialDirectorySection] = useState<DirectorySection>('connectors');
+  const [connectorMcpStatuses, setConnectorMcpStatuses] = useState<Record<string, ConnectorMcpStatus>>({});
+  const [connectorMcpConfigPath, setConnectorMcpConfigPath] = useState<string | null>(null);
+  const [connectorMcpPendingId, setConnectorMcpPendingId] = useState<ConnectorId | null>(null);
+  const [connectorComposioStatuses, setConnectorComposioStatuses] = useState<Record<string, ConnectorComposioStatus>>({});
+  const [connectorComposioConfigured, setConnectorComposioConfigured] = useState(false);
+  const [connectorComposioConfigPath, setConnectorComposioConfigPath] = useState<string | null>(null);
+  const [connectorComposioPendingId, setConnectorComposioPendingId] = useState<ConnectorId | null>(null);
+  const [skillTogglePendingId, setSkillTogglePendingId] = useState<string | null>(null);
+  const connectorUserId = useMemo(() => {
+    const appUser = getUser();
+    if (appUser?.id) {
+      return String(appUser.id);
+    }
+    if (appUser?.email) {
+      return String(appUser.email);
+    }
+
+    try {
+      const gatewayUser = JSON.parse(localStorage.getItem('gateway_user') || 'null');
+      if (gatewayUser?.id) {
+        return String(gatewayUser.id);
+      }
+      if (gatewayUser?.email) {
+        return String(gatewayUser.email);
+      }
+    } catch {}
+
+    return 'desktop-local-user';
+  }, []);
+
+  const selectedConnectorEntry = useMemo(
+    () => getConnectorCatalogEntry(selectedConnector) ?? connectorCatalog[0],
+    [selectedConnector],
+  );
+  const connectorRuntimeStatuses = useMemo<Record<string, ConnectorRuntimeStatus>>(
+    () =>
+      connectorCatalog.reduce((accumulator, connector) => {
+        accumulator[connector.id] = getConnectorRuntimeStatus({
+          connector,
+          composioConfigured: connectorComposioConfigured,
+          composioStatus: connectorComposioStatuses[connector.id] ?? null,
+          githubConnected,
+          mcpStatus: connectorMcpStatuses[connector.id] ?? null,
+        });
+        return accumulator;
+      }, {} as Record<string, ConnectorRuntimeStatus>),
+    [connectorComposioConfigured, connectorComposioStatuses, connectorMcpStatuses, githubConnected],
+  );
+  const selectedConnectorRuntimeStatus = connectorRuntimeStatuses[selectedConnector];
+  const directoryExampleSkills = useMemo<DirectorySkillSummary[]>(
+    () =>
+      examples.map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        description: skill.description || '',
+        enabled: skill.enabled,
+        isExample: skill.is_example,
+        sourceDir: skill.source_dir ?? null,
+      })),
+    [examples],
+  );
+  const directoryMySkills = useMemo<DirectorySkillSummary[]>(
+    () =>
+      mySkills.map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        description: skill.description || '',
+        enabled: skill.enabled,
+        isExample: skill.is_example,
+        sourceDir: skill.source_dir ?? null,
+      })),
+    [mySkills],
+  );
+
+  const openExternalUrl = (url: string) => {
+    if ((window as any).electronAPI?.openExternal) {
+      (window as any).electronAPI.openExternal(url);
+      return;
+    }
+
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
 
   useEffect(() => {
     getGithubStatus().then(data => {
@@ -228,15 +343,44 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
     return () => clearInterval(poll);
   }, [githubConnected]);
 
+  const refreshConnectorMcpStatus = useCallback(async () => {
+    try {
+      const data = await getConnectorMcpStatus();
+      setConnectorMcpStatuses(data.connectors || {});
+      setConnectorMcpConfigPath(data.configPath || null);
+    } catch (error) {
+      console.error('Connector MCP status error:', error);
+    }
+  }, []);
+
+  const refreshConnectorComposioStatus = useCallback(async () => {
+    try {
+      const data = await getConnectorComposioStatus(connectorUserId);
+      setConnectorComposioStatuses(data.connectors || {});
+      setConnectorComposioConfigured(Boolean(data.configured));
+      setConnectorComposioConfigPath(data.configPath || null);
+    } catch (error) {
+      console.error('Connector Composio status error:', error);
+    }
+  }, [connectorUserId]);
+
+  useEffect(() => {
+    void refreshConnectorMcpStatus();
+    void refreshConnectorComposioStatus();
+  }, [refreshConnectorComposioStatus, refreshConnectorMcpStatus]);
+
+  useEffect(() => {
+    const poll = window.setInterval(() => {
+      void refreshConnectorComposioStatus();
+    }, 5000);
+
+    return () => window.clearInterval(poll);
+  }, [refreshConnectorComposioStatus]);
+
   const handleGithubConnect = async () => {
     try {
       const { url } = await getGithubAuthUrl();
-      // Open in system browser (Electron) or new window (web)
-      if ((window as any).electronAPI?.openExternal) {
-        (window as any).electronAPI.openExternal(url);
-      } else {
-        window.open(url, '_blank');
-      }
+      openExternalUrl(url);
     } catch (e) { console.error('GitHub auth error:', e); }
   };
 
@@ -244,6 +388,102 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
     await disconnectGithub();
     setGithubConnected(false);
     setGithubUser(null);
+  };
+
+  const connectConnectorByComposio = async (connectorId: ConnectorId) => {
+    if (connectorComposioPendingId || connectorMcpPendingId) return;
+    setConnectorComposioPendingId(connectorId);
+    try {
+      const data = await connectConnectorViaComposio(connectorId, connectorUserId);
+      setConnectorComposioStatuses(data.connectors || {});
+      setConnectorComposioConfigured(true);
+      setConnectorComposioConfigPath(data.configPath || null);
+      openExternalUrl(data.redirectUrl);
+    } catch (error) {
+      console.error('Connector Composio connect error:', error);
+      window.alert(error instanceof Error ? error.message : 'Failed to connect connector');
+    } finally {
+      setConnectorComposioPendingId(null);
+    }
+  };
+
+  const installConnectorById = async (connectorId: ConnectorId) => {
+    const connectorStatus = connectorMcpStatuses[connectorId];
+    if (!connectorStatus || connectorMcpPendingId || connectorComposioPendingId) return;
+    setConnectorMcpPendingId(connectorId);
+    try {
+      const data = await installConnectorMcp(connectorId);
+      setConnectorMcpStatuses(data.connectors || {});
+      setConnectorMcpConfigPath(data.configPath || null);
+    } catch (error) {
+      console.error('Connector install error:', error);
+      window.alert(error instanceof Error ? error.message : 'Failed to install connector');
+    } finally {
+      setConnectorMcpPendingId(null);
+    }
+  };
+
+  const uninstallConnectorById = async (connectorId: ConnectorId) => {
+    const connectorStatus = connectorMcpStatuses[connectorId];
+    if (!connectorStatus || connectorMcpPendingId || connectorComposioPendingId) return;
+    setConnectorMcpPendingId(connectorId);
+    try {
+      const data = await uninstallConnectorMcp(connectorId);
+      setConnectorMcpStatuses(data.connectors || {});
+      setConnectorMcpConfigPath(data.configPath || null);
+    } catch (error) {
+      console.error('Connector uninstall error:', error);
+      window.alert(error instanceof Error ? error.message : 'Failed to remove connector');
+    } finally {
+      setConnectorMcpPendingId(null);
+    }
+  };
+
+  const uninstallComposioConnector = async () => {
+    if (connectorComposioPendingId || connectorMcpPendingId) return;
+    setConnectorComposioPendingId(selectedConnector);
+    try {
+      const data = await uninstallConnectorComposio(connectorUserId);
+      setConnectorComposioStatuses(data.connectors || {});
+      setConnectorComposioConfigPath(data.configPath || null);
+    } catch (error) {
+      console.error('Connector Composio uninstall error:', error);
+      window.alert(error instanceof Error ? error.message : 'Failed to remove Composio connector');
+    } finally {
+      setConnectorComposioPendingId(null);
+    }
+  };
+
+  const handlePrimaryConnectorAction = async (connectorId: ConnectorId) => {
+    const runtimeStatus = connectorRuntimeStatuses[connectorId];
+    if (!runtimeStatus) return;
+
+    if (runtimeStatus.kind === 'native') {
+      await handleGithubConnect();
+      return;
+    }
+
+    if (runtimeStatus.kind === 'composio') {
+      await connectConnectorByComposio(connectorId);
+      return;
+    }
+
+    if (runtimeStatus.kind === 'mcp') {
+      await installConnectorById(connectorId);
+    }
+  };
+
+  const handleInstallConnector = async () => {
+    await handlePrimaryConnectorAction(selectedConnector);
+  };
+
+  const handleUninstallConnector = async () => {
+    if (selectedConnectorRuntimeStatus?.kind === 'composio') {
+      await uninstallComposioConnector();
+      return;
+    }
+
+    await uninstallConnectorById(selectedConnector);
   };
 
   // Tree state
@@ -351,12 +591,17 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
 
   const handleToggle = async (id: string, current: boolean, e?: React.MouseEvent) => {
     e?.stopPropagation();
+    if (skillTogglePendingId && skillTogglePendingId !== id) return;
     try {
+      setSkillTogglePendingId(id);
       await toggleSkill(id, !current);
       setExamples(prev => prev.map(s => s.id === id ? { ...s, enabled: !current } : s));
       setMySkills(prev => prev.map(s => s.id === id ? { ...s, enabled: !current } : s));
       if (detail?.id === id) setDetail(prev => prev ? { ...prev, enabled: !current } : prev);
     } catch (e) { console.error(e); }
+    finally {
+      setSkillTogglePendingId(null);
+    }
   };
 
   const toggleSection = (section: string) => {
@@ -417,6 +662,55 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
     setEditName('');
     setEditDesc('');
     setEditContent('');
+  };
+
+  const openDirectory = (section: DirectorySection) => {
+    setInitialDirectorySection(section);
+    setShowDirectoryModal(true);
+  };
+
+  const openConnectorFromDirectory = (connectorId: ConnectorId) => {
+    setSelectedConnector(connectorId);
+    setTab('connectors');
+    setShowDirectoryModal(false);
+  };
+
+  const openSkillFromDirectory = (skillId: string) => {
+    setTab('skills');
+    setShowDirectoryModal(false);
+    void selectSkill(skillId);
+  };
+
+  const openCreateWithClaudeFromDirectory = () => {
+    setShowDirectoryModal(false);
+    onCreateWithClaude?.();
+  };
+
+  const openWriteSkillFromDirectory = () => {
+    setTab('skills');
+    setShowDirectoryModal(false);
+    startCreate();
+  };
+
+  const openUploadSkillFromDirectory = () => {
+    setTab('skills');
+    setShowDirectoryModal(false);
+    setShowUploadModal(true);
+  };
+
+  const enableSkillFromDirectory = async (skillId: string, nextEnabled: boolean) => {
+    const skill = [...examples, ...mySkills].find((entry) => entry.id === skillId);
+
+    if (!skill || skill.enabled === nextEnabled) {
+      openSkillFromDirectory(skillId);
+      return;
+    }
+
+    await handleToggle(skillId, skill.enabled);
+
+    if (nextEnabled) {
+      openSkillFromDirectory(skillId);
+    }
   };
 
   // Filter skills
@@ -599,169 +893,88 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
           </div>
         </div>
       ) : tab === 'connectors' ? (
-        <div className="w-[300px] border-r border-claude-border flex flex-col flex-shrink-0 bg-claude-bg">
-          <div className="h-14 px-4 flex items-center justify-between border-b border-claude-border">
-            <span className="font-semibold text-claude-text">Connectors</span>
-          </div>
-          <div className="flex-1 overflow-y-auto pt-4 px-2">
-            {/* Connected section */}
-            {githubConnected && (
-              <div className="mb-2">
-                <button className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-claude-textSecondary/80 uppercase tracking-wider">
-                  <ChevronDown size={14} className="stroke-[2px] opacity-70" />
-                  Connected
-                </button>
-                <div className="mt-1 px-1 space-y-1">
-                  <div
-                    onClick={() => setSelectedConnector('github')}
-                    className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] cursor-pointer transition-colors ${selectedConnector === 'github' ? 'bg-claude-hover' : 'hover:bg-claude-hover/50'}`}
-                  >
-                    <Github size={20} className="fill-current stroke-none opacity-80" />
-                    <span className="truncate text-[14px] text-claude-text font-medium">GitHub Integration</span>
-                    <div className="ml-auto w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
-                  </div>
-                </div>
-              </div>
-            )}
-            {/* Not connected section */}
-            {(!githubConnected || true) && (
-              <div className="mb-2">
-                <button className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-claude-textSecondary/80 uppercase tracking-wider">
-                  <ChevronDown size={14} className="stroke-[2px] opacity-70" />
-                  {githubConnected ? 'Available' : 'Not connected'}
-                </button>
-                <div className="mt-1 px-1 space-y-1">
-                  {!githubConnected && (
-                    <div
-                      onClick={() => setSelectedConnector('github')}
-                      className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] cursor-pointer transition-colors ${selectedConnector === 'github' ? 'bg-claude-hover' : 'hover:bg-claude-hover/50'}`}
-                    >
-                      <Github size={20} className="fill-current stroke-none opacity-80" />
-                      <span className={`truncate text-[14px] ${selectedConnector === 'github' ? 'text-claude-text font-medium' : 'text-claude-textSecondary'}`}>GitHub Integration</span>
-                    </div>
-                  )}
-                  <div
-                    onClick={() => setSelectedConnector('gdrive')}
-                    className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] cursor-pointer transition-colors ${selectedConnector === 'gdrive' ? 'bg-claude-hover' : 'hover:bg-claude-hover/50'}`}
-                  >
-                    <div className="w-5 h-5 flex items-center justify-center">
-                      <img src="https://upload.wikimedia.org/wikipedia/commons/1/12/Google_Drive_icon_%282020%29.svg" className="w-[18px] h-[18px]" alt="" />
-                    </div>
-                    <span className={`truncate text-[14px] ${selectedConnector === 'gdrive' ? 'text-claude-text font-medium' : 'text-claude-textSecondary'}`}>Google Drive</span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
+        <ConnectorSidebar
+          connectorStatuses={connectorRuntimeStatuses}
+          onBrowseDirectory={() => openDirectory('connectors')}
+          onSelect={(connectorId) => setSelectedConnector(connectorId)}
+          selectedConnectorId={selectedConnector}
+        />
       ) : null}
 
       {/* 3. Right Column: Detail / Create / Overview */}
       <div className="flex-1 flex flex-col min-w-0">
         {tab === 'overview' ? (
-          <div className="flex flex-col items-center justify-center h-full max-w-2xl mx-auto px-6 py-12">
-            <div className="mb-6">
-              <img src={customizeMainImg} alt="Customize" className="w-[140px] h-auto dark:invert opacity-90" />
-            </div>
-            <div className="text-center mb-12">
-              <h2 className="text-xl font-medium text-claude-text mb-2">Customize and manage the context and tools you are giving Claude.</h2>
-            </div>
+          <div className="flex h-full flex-col items-center overflow-y-auto bg-claude-bg">
+            <div className="mx-auto flex w-full max-w-[560px] flex-col items-center px-6 pb-24 pt-[14vh] lg:pt-[220px]">
+              <div className="mb-4 flex h-[96px] w-[96px] items-center justify-center">
+                <img src={customizeMainImg} alt="Customize" className="w-[96px] h-auto dark:invert opacity-90" />
+              </div>
 
-            <div className="w-full space-y-4">
-              <button
-                onClick={() => setTab('connectors')}
-                className="w-full flex items-center p-4 border border-claude-border bg-black/[0.02] dark:bg-white/[0.04] rounded-[24px] hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors text-left group"
-              >
-                <div className="w-11 h-11 rounded-xl bg-claude-bg/50 border border-claude-border flex items-center justify-center mr-4 group-hover:border-claude-textSecondary/30 transition-colors">
-                  <img src={connectorsImg} className="w-7 h-7 dark:invert opacity-70" alt="Connectors" />
-                </div>
-                <div>
-                  <div className="font-medium text-claude-text text-[15.5px]">Connect your apps</div>
-                  <div className="text-sm text-claude-textSecondary">Integrate with the tools you use to complete your tasks</div>
-                </div>
-                <div className="ml-auto pr-2">
-                  <ArrowLeft size={16} className="rotate-180 text-claude-textSecondary" />
-                </div>
-              </button>
+              <div className="mb-10 text-center">
+                <h2 className="font-serif text-[29px] font-medium leading-[1.15] text-claude-text">Customize Claude</h2>
+                <p className="mt-2 text-[14px] leading-5 text-claude-textSecondary">
+                  Skills, connectors, and plugins shape how Claude works with you.
+                </p>
+              </div>
 
-              <button
-                onClick={() => {
-                  setTab('skills');
-                  startCreate();
-                }}
-                className="w-full flex items-center p-4 border border-claude-border bg-black/[0.02] dark:bg-white/[0.04] rounded-[24px] hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-colors text-left group"
-              >
-                <div className="w-11 h-11 rounded-xl bg-claude-bg/50 border border-claude-border flex items-center justify-center mr-4 group-hover:border-claude-textSecondary/30 transition-colors">
-                  <img src={createSkillsImg} className="w-7 h-7 dark:invert opacity-70" alt="Skills" />
-                </div>
-                <div>
-                  <div className="font-medium text-claude-text text-[15.5px]">Create new skills</div>
-                  <div className="text-sm text-claude-textSecondary">Teach Claude your processes, team norms, and expertise</div>
-                </div>
-                <div className="ml-auto pr-2">
-                  <ArrowLeft size={16} className="rotate-180 text-claude-textSecondary" />
-                </div>
-              </button>
+              <div className="w-full space-y-3">
+                <button
+                  onClick={() => openDirectory('connectors')}
+                  className="w-full rounded-[24px] border border-claude-border bg-white px-5 py-[21px] text-left shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-colors hover:bg-[#fcfcfb] dark:bg-[#30302E] dark:hover:bg-[#353533]"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-claude-hover">
+                      <img src={connectorsImg} className="h-5 w-5 dark:invert opacity-80" alt="Connectors" />
+                    </div>
+                    <div>
+                      <div className="text-[15px] font-medium text-claude-text">Connect your apps</div>
+                      <div className="mt-0.5 text-[13.5px] leading-5 text-claude-textSecondary">
+                        Let Claude read and write to the tools you already use.
+                      </div>
+                    </div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setTab('skills');
+                    startCreate();
+                  }}
+                  className="w-full rounded-[24px] border border-claude-border bg-white px-5 py-[21px] text-left shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-colors hover:bg-[#fcfcfb] dark:bg-[#30302E] dark:hover:bg-[#353533]"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-claude-hover">
+                      <img src={createSkillsImg} className="h-5 w-5 dark:invert opacity-80" alt="Skills" />
+                    </div>
+                    <div>
+                      <div className="text-[15px] font-medium text-claude-text">Create new skills</div>
+                      <div className="mt-0.5 text-[13.5px] leading-5 text-claude-textSecondary">
+                        Teach Claude your processes, team norms, and expertise.
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              </div>
             </div>
           </div>
         ) : tab === 'connectors' ? (
-          <div className="flex-1 h-full bg-claude-bg overflow-y-auto">
-            {selectedConnector === 'github' ? (
-              githubConnected ? (
-                <div className="h-full flex flex-col">
-                  {/* Header */}
-                  <div className="flex items-center justify-between px-8 py-5 border-b border-claude-border">
-                    <div className="flex items-center gap-3">
-                      <Github size={22} className="fill-current stroke-none text-claude-text" />
-                      <span className="text-[17px] font-semibold text-claude-text">GitHub Integration</span>
-                    </div>
-                    <button onClick={handleGithubDisconnect} className="px-4 py-1.5 text-[13px] font-medium text-claude-textSecondary border border-claude-border rounded-lg hover:bg-claude-hover transition-colors">
-                      Disconnect
-                    </button>
-                  </div>
-                  {/* Content */}
-                  <div className="px-8 py-6 overflow-y-auto">
-                    <p className="text-[14px] text-claude-textSecondary mb-6 leading-relaxed">
-                      已连接 GitHub 账号 <span className="text-claude-text font-medium">{githubUser?.login}</span>，Claude 可以访问你的仓库来辅助对话。
-                    </p>
-                    <ul className="space-y-4 text-[14px] text-claude-textSecondary leading-relaxed">
-                      <li>
-                        <span className="text-claude-text font-medium">对话</span> — 提问时可以直接引用仓库中的文件作为上下文。
-                      </li>
-                      <li>
-                        <span className="text-claude-text font-medium">项目</span> — 将仓库文件同步到项目中，让 Claude 始终了解你的代码库。
-                      </li>
-                      <li>
-                        <span className="text-claude-text font-medium">代码</span> — 浏览仓库分支、查看代码、追踪 Pull Request。
-                      </li>
-                      <li>
-                        <span className="text-claude-text font-medium">更多</span> — 支持代码审查、仓库搜索等更多 GitHub 功能。
-                      </li>
-                    </ul>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center h-full mt-[-10vh]">
-                  <div className="w-[68px] h-[68px] bg-black/[0.03] dark:bg-white/[0.04] border border-claude-border rounded-[18px] flex items-center justify-center mb-6 shadow-sm">
-                    <Github size={36} className="text-claude-text fill-current stroke-none" />
-                  </div>
-                  <p className="text-[14px] text-claude-textSecondary mb-6 font-normal">你还没有连接 GitHub。</p>
-                  <button
-                    onClick={handleGithubConnect}
-                    className="px-6 py-2.5 text-[14px] font-medium text-claude-bg bg-claude-text hover:opacity-90 rounded-[10px] transition-colors shadow-sm"
-                  >
-                    连接
-                  </button>
-                </div>
-              )
-            ) : (
-              <div className="flex flex-col items-center mt-[-10vh]">
-                <div className="w-[68px] h-[68px] bg-black/[0.03] dark:bg-white/[0.04] border border-claude-border rounded-[18px] flex items-center justify-center mb-6 shadow-sm">
-                  <img src="https://upload.wikimedia.org/wikipedia/commons/1/12/Google_Drive_icon_%282020%29.svg" className="w-9 h-9" alt="" />
-                </div>
-                <p className="text-[14px] text-claude-textSecondary mb-6 font-normal">Google Drive integration coming soon.</p>
-              </div>
-            )}
+          <div className="flex-1 h-full min-w-0 bg-claude-bg">
+            <ConnectorDetailsPanel
+              connector={selectedConnectorEntry}
+              githubUser={githubUser}
+              mcpConfigPath={connectorComposioConfigPath || connectorMcpConfigPath}
+              mcpBusy={
+                connectorMcpPendingId === selectedConnector ||
+                connectorComposioPendingId === selectedConnector
+              }
+              runtimeStatus={selectedConnectorRuntimeStatus}
+              onConnectConnector={() => void handlePrimaryConnectorAction(selectedConnector)}
+              onGithubConnect={handleGithubConnect}
+              onGithubDisconnect={handleGithubDisconnect}
+              onInstallConnector={handleInstallConnector}
+              onOpenWebsite={openExternalUrl}
+              onUninstallConnector={handleUninstallConnector}
+            />
           </div>
         ) : creating ? (
           // Create Form
@@ -891,6 +1104,25 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
         )}
       </div>
 
+      {showDirectoryModal && (
+        <DirectoryModal
+          examples={directoryExampleSkills}
+          connectorStatuses={connectorRuntimeStatuses}
+          initialSection={initialDirectorySection}
+          mySkills={directoryMySkills}
+          onClose={() => setShowDirectoryModal(false)}
+          onCreateWithClaude={openCreateWithClaudeFromDirectory}
+          onTriggerConnectorAction={(connectorId) => void handlePrimaryConnectorAction(connectorId)}
+          onOpenConnector={openConnectorFromDirectory}
+          onOpenSkill={openSkillFromDirectory}
+          onToggleSkill={enableSkillFromDirectory}
+          onUploadSkill={openUploadSkillFromDirectory}
+          onWriteSkill={openWriteSkillFromDirectory}
+          pendingConnectorId={connectorMcpPendingId || connectorComposioPendingId}
+          pendingSkillId={skillTogglePendingId}
+        />
+      )}
+
       {showUploadModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-claude-bg w-[460px] rounded-[16px] flex flex-col shadow-[0_10px_40px_rgba(0,0,0,0.25)] dark:shadow-[0_10px_40px_rgba(0,0,0,0.5)] relative border border-claude-border overflow-hidden">
@@ -905,7 +1137,7 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
               const file = e.target.files?.[0];
               if (!file) return;
               setUploadErr(''); setUploading(true);
-              try { await importSkill(file); setShowUploadModal(false); const list = await getSkills(); setSkills(list); }
+              try { await importSkill(file); setShowUploadModal(false); await fetchList(); }
               catch (err: any) { setUploadErr(err.message || '导入失败'); }
               finally { setUploading(false); if (uploadFileRef.current) uploadFileRef.current.value = ''; }
             }} />
@@ -919,7 +1151,7 @@ const CustomizePage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void
                 const file = e.dataTransfer.files?.[0];
                 if (!file) return;
                 setUploadErr(''); setUploading(true);
-                try { await importSkill(file); setShowUploadModal(false); const list = await getSkills(); setSkills(list); }
+                try { await importSkill(file); setShowUploadModal(false); await fetchList(); }
                 catch (err: any) { setUploadErr(err.message || '导入失败'); }
                 finally { setUploading(false); }
               }}

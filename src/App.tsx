@@ -26,6 +26,8 @@ import AdminAnnouncements from './components/admin/AdminAnnouncements';
 import ChatsPage from './components/ChatsPage';
 import CustomizePage from './components/CustomizePage';
 import ProjectsPage from './components/ProjectsPage';
+import CoworkPage from './components/CoworkPage';
+import ScheduledPage from './components/ScheduledPage';
 
 const Tooltip = ({ children, text, shortcut }: { children: React.ReactNode; text: string; shortcut?: string }) => {
   const [show, setShow] = useState(false);
@@ -639,27 +641,7 @@ const Layout = () => {
             )}
           </div>
 
-          {/* Center Mode Tabs */}
-          <div
-            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center rounded-xl p-0.5"
-            style={{ pointerEvents: 'auto', WebkitAppRegion: 'no-drag', backgroundColor: 'var(--bg-mode-tabs)' } as React.CSSProperties}
-          >
-            <Tooltip text="Chat" shortcut="Ctrl+1">
-              <button className="px-3.5 py-1 text-[13px] font-medium rounded-[10px] text-claude-text shadow-sm transition-colors" style={{ backgroundColor: 'var(--bg-mode-tab-active)', fontFamily: 'Inter, system-ui, -apple-system, sans-serif', letterSpacing: '0.01em' }}>
-                Chat
-              </button>
-            </Tooltip>
-            <Tooltip text="Cowork" shortcut="Ctrl+2">
-              <button className="px-3.5 py-1 text-[13px] font-medium rounded-[10px] text-claude-textSecondary hover:text-claude-text transition-colors" style={{ fontFamily: 'Inter, system-ui, -apple-system, sans-serif', letterSpacing: '0.01em' }}>
-                Cowork
-              </button>
-            </Tooltip>
-            <Tooltip text="Code" shortcut="Ctrl+3">
-              <button className="px-3.5 py-1 text-[13px] font-medium rounded-[10px] text-claude-textSecondary hover:text-claude-text transition-colors" style={{ fontFamily: 'Inter, system-ui, -apple-system, sans-serif', letterSpacing: '0.01em' }}>
-                Code
-              </button>
-            </Tooltip>
-          </div>
+          {/* Mode tabs moved to sidebar */}
         </div>
 
         <Sidebar
@@ -693,7 +675,7 @@ const Layout = () => {
             {/* Main Content Area - takes remaining width after panel */}
             <div className="flex-1 flex flex-col h-full min-w-0">
               {/* Header - Only render here if NOT in Artifacts-only mode */}
-              {isChatMode && (!showArtifacts || documentPanelDoc) && !showSettings && !showUpgrade && location.pathname !== '/chats' && location.pathname !== '/customize' && location.pathname !== '/projects' && location.pathname !== '/artifacts' && (
+              {isChatMode && (!showArtifacts || documentPanelDoc) && !showSettings && !showUpgrade && location.pathname !== '/chats' && location.pathname !== '/customize' && location.pathname !== '/projects' && location.pathname !== '/artifacts' && location.pathname !== '/cowork' && location.pathname !== '/scheduled' && (
                 <ChatHeader
                   title={currentChatTitle}
                   showArtifacts={showArtifacts}
@@ -718,6 +700,16 @@ const Layout = () => {
                 }} />
               ) : location.pathname === '/projects' ? (
                 <ProjectsPage />
+              ) : location.pathname === '/cowork' ? (
+                <CoworkPage onStartTask={(prompt) => {
+                  if (prompt && prompt.trim()) {
+                    sessionStorage.setItem('prefill_input', prompt.trim());
+                  }
+                  handleNewChat();
+                  navigate('/');
+                }} />
+              ) : location.pathname === '/scheduled' ? (
+                <ScheduledPage onNewTask={() => navigate('/cowork')} />
               ) : location.pathname === '/artifacts' ? (
                 <ArtifactsPage onTryPrompt={(prompt) => {
                   if (prompt === '__remix__') {
@@ -837,6 +829,8 @@ const App = () => {
         <Route path="/customize" element={<Layout />} />
         <Route path="/projects" element={<Layout />} />
         <Route path="/artifacts" element={<Layout />} />
+        <Route path="/cowork" element={<Layout />} />
+        <Route path="/scheduled" element={<Layout />} />
         <Route path="/chat/:id" element={<Layout />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

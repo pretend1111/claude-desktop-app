@@ -810,32 +810,8 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
                 <button
                   key={opt.value}
                   onClick={() => {
-                    const prevMode = localStorage.getItem('user_mode') || 'selfhosted';
-                    const nextMode = opt.value;
-                    localStorage.setItem('user_mode', nextMode);
-
-                    // Cross-mode config leakage — the previous behaviour kept
-                    // chat_models / default_model / CUSTOM_* around when switching
-                    // modes, which let a selfhosted minimax model silently ride
-                    // into clawparrot (wrong provider + wrong billing). Scrub
-                    // mode-specific settings whenever the mode actually changes.
-                    if (prevMode !== nextMode) {
-                      localStorage.removeItem('chat_models');
-                      localStorage.removeItem('default_model');
-                      if (nextMode === 'clawparrot') {
-                        // clawparrot must never fall through to a user-pasted
-                        // relay key — strip any stale CUSTOM_* values left from
-                        // an old selfhosted session.
-                        localStorage.removeItem('CUSTOM_API_KEY');
-                        localStorage.removeItem('CUSTOM_BASE_URL');
-                      }
-                      // Per-conversation cross-mode overrides point at the old
-                      // mode; drop them so old convs re-resolve against the new
-                      // mode (or show the cross-mode warning on first send).
-                      localStorage.removeItem('cross_mode_overrides');
-                    }
-
-                    if (nextMode === 'clawparrot') {
+                    localStorage.setItem('user_mode', opt.value);
+                    if (opt.value === 'clawparrot') {
                       // Check if logged in, if not redirect
                       const hasKey = localStorage.getItem('ANTHROPIC_API_KEY') && localStorage.getItem('gateway_user');
                       if (!hasKey) {

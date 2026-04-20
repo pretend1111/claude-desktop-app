@@ -80,6 +80,8 @@ interface ModelSelectorProps {
   onModelChange: (newModelString: string) => void;
   isNewChat?: boolean;
   dropdownPosition?: 'top' | 'bottom';
+  variant?: 'default' | 'landing';
+  caretIconSrc?: string;
 }
 
 const ModelSelector: React.FC<ModelSelectorProps> = ({
@@ -87,6 +89,8 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   models,
   onModelChange,
   dropdownPosition,
+  variant = 'default',
+  caretIconSrc,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [dropUp, setDropUp] = useState(false);
@@ -105,6 +109,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
 
   // Current model supports thinking?
   const currentHasThinking = hasThinkingVariant(currentBase);
+  const isLandingVariant = variant === 'landing';
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -164,11 +169,28 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
     <div className="relative inline-block text-right" ref={containerRef}>
       <button
         onClick={handleToggleOpen}
-        className="flex items-center gap-1.5 text-[15px] font-medium text-claude-text hover:bg-claude-hover px-3 py-2 rounded-md transition-colors"
+        className={
+          isLandingVariant
+            ? 'flex h-[32px] items-center gap-[6px] rounded-[6px] px-[10px] text-[14px] font-normal tracking-[-0.1504px] text-[#373734] dark:text-claude-text transition-colors hover:bg-[#f5f4f1] dark:hover:bg-white/5'
+            : 'flex items-center gap-1.5 text-[15px] font-medium text-claude-text hover:bg-claude-hover px-3 py-2 rounded-md transition-colors'
+        }
       >
         <span>{currentLabel}</span>
-        {thinking && <span className="text-claude-textSecondary font-normal">Extended</span>}
-        <ChevronDown size={14} className="text-claude-textSecondary" />
+        {thinking && (
+          <span className={isLandingVariant ? 'font-normal text-[#7b7974] dark:text-claude-textSecondary' : 'text-claude-textSecondary font-normal'}>
+            Extended
+          </span>
+        )}
+        {caretIconSrc ? (
+          <img
+            src={caretIconSrc}
+            alt=""
+            aria-hidden="true"
+            className={isLandingVariant ? 'h-4 w-4 opacity-75 dark:invert dark:brightness-150' : 'h-[14px] w-[14px] opacity-75 dark:invert dark:brightness-150'}
+          />
+        ) : (
+          <ChevronDown size={isLandingVariant ? 16 : 14} className={isLandingVariant ? 'text-[#373734]/75 dark:text-claude-text/75' : 'text-claude-textSecondary'} />
+        )}
       </button>
 
       {isOpen && !showMore && (
@@ -228,4 +250,3 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
 };
 
 export default ModelSelector;
-
