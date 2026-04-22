@@ -60,3 +60,35 @@ test('provider CRUD helpers reject non-ok bridge responses instead of blindly re
     'Provider API helpers should surface bridge errors so add-provider failures are visible in the UI'
   );
 });
+
+test('provider settings catches edit and delete failures now that provider CRUD throws', () => {
+  assert.match(
+    providerSource,
+    /const \[providerActionError,\s*setProviderActionError\] = useState<string \| null>\(null\);/,
+    'ProviderSettings should keep a dedicated error state for edit/delete failures instead of letting event-handler rejections escape'
+  );
+
+  assert.match(
+    providerSource,
+    /const handleUpdate = async \(id: string, updates: Partial<Provider>\) => \{\s*try \{/,
+    'ProviderSettings should catch updateProvider failures inside handleUpdate'
+  );
+
+  assert.match(
+    providerSource,
+    /const handleDelete = async \(id: string\) => \{\s*try \{/,
+    'ProviderSettings should catch deleteProvider failures inside handleDelete'
+  );
+
+  assert.match(
+    providerSource,
+    /setProviderActionError\(error instanceof Error \? error\.message : '更新供应商失败'\)/,
+    'ProviderSettings should surface update failures to the user'
+  );
+
+  assert.match(
+    providerSource,
+    /setProviderActionError\(error instanceof Error \? error\.message : '删除供应商失败'\)/,
+    'ProviderSettings should surface delete failures to the user'
+  );
+});

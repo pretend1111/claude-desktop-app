@@ -263,8 +263,10 @@ const ProviderSettings: React.FC = () => {
   const [newUrl, setNewUrl] = useState('');
   const [newKey, setNewKey] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
+  const [providerActionError, setProviderActionError] = useState<string | null>(null);
 
   useEffect(() => { loadProviders(); }, []);
+  useEffect(() => { setProviderActionError(null); }, [selectedId]);
 
   const loadProviders = async () => {
     try {
@@ -361,14 +363,24 @@ const ProviderSettings: React.FC = () => {
   }
 
   const handleUpdate = async (id: string, updates: Partial<Provider>) => {
-    const updated = await updateProvider(id, updates);
-    setProviderList(prev => prev.map(p => p.id === id ? { ...p, ...updated } : p));
+    try {
+      setProviderActionError(null);
+      const updated = await updateProvider(id, updates);
+      setProviderList(prev => prev.map(p => p.id === id ? { ...p, ...updated } : p));
+    } catch (error) {
+      setProviderActionError(error instanceof Error ? error.message : '更新供应商失败');
+    }
   };
 
   const handleDelete = async (id: string) => {
-    await deleteProvider(id);
-    setProviderList(prev => prev.filter(p => p.id !== id));
-    if (selectedId === id) setSelectedId(providerList.find(p => p.id !== id)?.id || null);
+    try {
+      setProviderActionError(null);
+      await deleteProvider(id);
+      setProviderList(prev => prev.filter(p => p.id !== id));
+      if (selectedId === id) setSelectedId(providerList.find(p => p.id !== id)?.id || null);
+    } catch (error) {
+      setProviderActionError(error instanceof Error ? error.message : '删除供应商失败');
+    }
   };
 
   // Auto-fetch models from /v1/models endpoint
@@ -733,6 +745,9 @@ const ProviderSettings: React.FC = () => {
                     <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${selected.enabled ? 'left-5' : 'left-1'}`} />
                   </button>
                 </div>
+                {providerActionError && (
+                  <div className="mt-[-10px] text-[12px] text-red-400/90">{providerActionError}</div>
+                )}
 
                 {/* API Key */}
                 <div>
