@@ -1,0 +1,117 @@
+name: Upload Windows Release Assets
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to upload assets to
+        required: true
+        default: v1.16.14
+      source_ref:
+        description: Git ref to build from
+        required: true
+        default: v1.16.14
+
+jobs:
+  build-windows:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            bun_ext: .exe
+          - os: windows-11-arm
+            arch: arm64
+            bun_ext: .exe
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout source ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install app dependencies
+        run: npm ci
+
+      - name: Install engine dependencies
+        run: cd engine && bun install
+
+      - name: Copy Bun binary to engine/bin
+        shell: bash
+        run: |
+          mkdir -p engine/bin
+          BUN_PATH=$(which bun)
+          cp "$BUN_PATH" "engine/bin/bun${{ matrix.bun_ext }}"
+          chmod +x "engine/bin/bun${{ matrix.bun_ext }}" 2>/dev/null || true
+          ls -lh engine/bin/
+
+      - name: Write build-time secrets
+        shell: bash
+        env:
+          GH_OAUTH_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const secrets = {};
+            if (process.env.GH_OAUTH_SECRET) secrets.GITHUB_CLIENT_SECRET = process.env.GH_OAUTH_SECRET;
+            fs.writeFileSync('electron/secrets.json', JSON.stringify(secrets, null, 2));
+            console.log('secrets.json written, keys:', Object.keys(secrets));
+          "
+
+      - name: Build frontend
+        run: npx vite build
+
+      - name: Build Windows installer
+        run: npx electron-builder --win nsis --${{ matrix.arch }} --publish never
+
+      - name: Upload architecture-specific assets
+        shell: bash
+        run: |
+          VERSION="${{ inputs.release_tag }}"
+          VERSION="${VERSION#v}"
+          EXE_PATH=$(find release -maxdepth 1 -type f -name '*.exe' ! -name '*.exe.blockmap' | head -n 1)
+          BLOCKMAP_PATH=$(find release -maxdepth 1 -type f -name '*.exe.blockmap' | head -n 1 || true)
+
+          if [ -z "$EXE_PATH" ]; then
+            echo "No Windows installer found in release/"
+            exit 1
+          fi
+
+          DEST_EXE="Claude-Desktop-Setup-${VERSION}-${{ matrix.arch }}.exe"
+          cp "$EXE_PATH" "release/$DEST_EXE"
+          gh release upload "${{ inputs.release_tag }}" "release/$DEST_EXE" --clobber
+
+          if [ -n "$BLOCKMAP_PATH" ] && [ -f "$BLOCKMAP_PATH" ]; then
+            DEST_BLOCKMAP="${DEST_EXE}.blockmap"
+            cp "$BLOCKMAP_PATH" "release/$DEST_BLOCKMAP"
+            gh release upload "${{ inputs.release_tag }}" "release/$DEST_BLOCKMAP" --clobber
+          fi
+
+  cleanup-generic-assets:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Delete ambiguous generic Windows assets
+        shell: bash
+        run: |
+          VERSION="${{ inputs.release_tag }}"
+          VERSION="${VERSION#v}"
+          gh release delete-asset "${{ inputs.release_tag }}" "Claude-Desktop-Setup-${VERSION}.exe" --yes || true
+          gh release delete-asset "${{ inputs.release_tag }}" "Claude-Desktop-Setup-${VERSION}.exe.blockmap" --yes || true
