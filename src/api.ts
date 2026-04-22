@@ -710,6 +710,25 @@ export interface WebSearchTestResult {
   reason?: string;
 }
 
+async function readJsonWithError(res: Response) {
+  const text = await res.text();
+  let data: any = null;
+
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+
+  if (!res.ok) {
+    throw new Error(data?.error || data?.message || `HTTP ${res.status}`);
+  }
+
+  return data;
+}
+
 export async function testProviderWebSearch(id: string): Promise<WebSearchTestResult> {
   const res = await fetch(`${API_BASE}/providers/${id}/test-websearch`, { method: 'POST' });
   if (!res.ok) return { ok: false, reason: 'HTTP ' + res.status };
@@ -718,22 +737,23 @@ export async function testProviderWebSearch(id: string): Promise<WebSearchTestRe
 
 export async function getProviders(): Promise<Provider[]> {
   const res = await fetch(`${API_BASE}/providers`);
-  return res.json();
+  return readJsonWithError(res);
 }
 export async function createProvider(p: Partial<Provider>): Promise<Provider> {
   const res = await fetch(`${API_BASE}/providers`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p) });
-  return res.json();
+  return readJsonWithError(res);
 }
 export async function updateProvider(id: string, p: Partial<Provider>): Promise<Provider> {
   const res = await fetch(`${API_BASE}/providers/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p) });
-  return res.json();
+  return readJsonWithError(res);
 }
 export async function deleteProvider(id: string): Promise<void> {
-  await fetch(`${API_BASE}/providers/${id}`, { method: 'DELETE' });
+  const res = await fetch(`${API_BASE}/providers/${id}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
 }
 export async function getProviderModels(): Promise<Array<{ id: string; name: string; providerId: string; providerName: string }>> {
   const res = await fetch(`${API_BASE}/providers/models`);
-  return res.json();
+  return readJsonWithError(res);
 }
 
 // Check if a conversation has an active engine stream

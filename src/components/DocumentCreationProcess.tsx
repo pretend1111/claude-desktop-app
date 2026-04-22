@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ChevronDown, Check, FileText } from 'lucide-react';
+import { getDocumentFormatBadge, getDocumentKindLabel, getDocumentSubtitle } from './documentCardMeta.js';
 
 export interface DocumentDraftInfo {
   draftId: string;
@@ -9,13 +10,6 @@ export interface DocumentDraftInfo {
   previewAvailable?: boolean;
   done?: boolean;
 }
-
-const labelForFormat = (format?: string) => {
-  const fmt = (format || 'markdown').toLowerCase();
-  if (fmt === 'markdown') return 'Markdown document';
-  if (fmt === 'docx') return 'Word document';
-  return `${fmt.toUpperCase()} file`;
-};
 
 const summaryForDraft = (draft: DocumentDraftInfo) => {
   if (draft.title?.trim()) return draft.title.trim();
@@ -27,6 +21,9 @@ const summaryForDraft = (draft: DocumentDraftInfo) => {
 
 const DocumentDraftItem: React.FC<{ draft: DocumentDraftInfo }> = ({ draft }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const kindLabel = getDocumentKindLabel(draft);
+  const formatBadge = getDocumentFormatBadge(draft);
+  const subtitle = getDocumentSubtitle(draft);
 
   return (
     <div className="relative pl-8 pb-2">
@@ -43,7 +40,7 @@ const DocumentDraftItem: React.FC<{ draft: DocumentDraftInfo }> = ({ draft }) =>
             {summaryForDraft(draft)}
           </div>
           <div className="text-[11px] text-claude-textSecondary">
-            {draft.done ? 'Document created' : 'Creating document'} · {labelForFormat(draft.format)}
+            {draft.done ? `${kindLabel} created` : `Creating ${kindLabel.toLowerCase()}`} · {formatBadge}
           </div>
         </div>
 
@@ -57,7 +54,7 @@ const DocumentDraftItem: React.FC<{ draft: DocumentDraftInfo }> = ({ draft }) =>
         <div className="bg-[#F9F9F8] border border-[#E5E5E5] rounded-xl overflow-hidden shadow-sm mt-1">
           <div className="px-3 py-2 border-b border-[#ECEBE7] bg-[#FCFCFB]">
             <div className="text-[12px] font-medium text-claude-text">{draft.title || 'Untitled document'}</div>
-            <div className="text-[11px] text-claude-textSecondary">{labelForFormat(draft.format)}</div>
+            <div className="text-[11px] text-claude-textSecondary">{subtitle}</div>
           </div>
           <div className="max-h-[280px] overflow-auto px-3 py-2">
             <pre className="whitespace-pre-wrap break-words text-[12px] leading-5 font-mono text-[#404040]">

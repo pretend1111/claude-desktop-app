@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { ChevronDown, FileText, ArrowUp, RotateCcw, Pencil, Copy, Check, Paperclip, ListCollapse, Globe, Clock, Info, Github, Plus, X, Loader2 } from 'lucide-react';
+import { ChevronDown, FileText, ArrowUp, RotateCcw, Pencil, Copy, Check, Globe, Clock, Info, Plus, X, Loader2 } from 'lucide-react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { IconPlus, IconVoice, IconPencil, IconProjects, IconResearch, IconWebSearch, IconCoworkSparkle } from './Icons';
 import AssistantActivityIndicator from './AssistantActivityIndicator';
@@ -14,10 +14,13 @@ import AddFromGithubModal, { GithubAddPayload } from './AddFromGithubModal';
 import MessageAttachments from './MessageAttachments';
 import DocumentCard, { DocumentInfo } from './DocumentCard';
 import { copyToClipboard } from '../utils/clipboard';
+import { normalizeGeneratedDocumentFormat } from './documentCardMeta.js';
 import SearchProcess from './SearchProcess';
+import AssistantThinkingChain, { AssistantThinkingCompactStatus } from './AssistantThinkingChain';
 import DocumentCreationProcess, { DocumentDraftInfo } from './DocumentCreationProcess';
 import CodeExecution from './CodeExecution';
 import ToolDiffView, { shouldUseDiffView, hasExpandableContent, getToolStats } from './ToolDiffView';
+import { buildToolFallbackThinking, buildReasoningTimelineEvents, buildResponseFallbackThinking, getToolDisplayName, HIDDEN_TOOL_NAMES } from './toolThinkingFallback.js';
 import { executeCode, sendCodeResult, setStatusCallback } from '../pyodideRunner';
 import inspirationsData from '../data/inspirations.json';
 import inputPlusIcon from '../assets/home/input-plus.svg';
@@ -68,6 +71,24 @@ const pickInspirations = (names: string[]) =>
   names
     .map((name) => inspirationLibrary.find((item) => item.name === name))
     .filter((item): item is InspirationItem => Boolean(item));
+
+const sanitizeSelfHostedChatModels = (rawModels: any[]) => (
+  Array.isArray(rawModels)
+    ? rawModels.flatMap((model) => {
+        const id = typeof model?.id === 'string' ? model.id.trim() : '';
+        const providerId = typeof model?.providerId === 'string' ? model.providerId.trim() : '';
+        if (!id || !providerId) return [];
+
+        return [{
+          ...model,
+          id,
+          providerId,
+          name: typeof model?.name === 'string' && model.name.trim() ? model.name.trim() : id,
+          providerName: typeof model?.providerName === 'string' && model.providerName.trim() ? model.providerName.trim() : 'Custom provider',
+        }];
+      })
+    : []
+);
 
 const LANDING_PROMPT_SECTIONS = [
   {
@@ -328,6 +349,23 @@ function isThinkingModel(model: string) {
   return typeof model === 'string' && model.endsWith('-thinking');
 }
 
+function getStoredMessageModel(message: any): string {
+  const candidates = [message?.model, message?.generation_model, message?.request_model];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return '';
+}
+
+function resolveMessagePresentationModel(message: any, currentModelString: string, isStreamingCurrentTurn: boolean) {
+  const storedModel = getStoredMessageModel(message);
+  if (storedModel) return storedModel;
+  if (isStreamingCurrentTurn) return currentModelString;
+  return '';
+}
+
 // ─── Cross-mode override helpers ──────────────────────────────────────────────
 // When a conversation's model belongs to a different mode than the user is
 // currently in, we let the user opt to "keep using the cross-mode model".
@@ -393,6 +431,27 @@ function extractTextContent(content: any): string {
   return content;
 }
 
+function extractToolSummaryHint(message: any): string {
+  if (!message) return '';
+
+  if (Array.isArray(message.toolCalls)) {
+    for (const toolCall of message.toolCalls) {
+      const textBefore = extractTextContent(toolCall?.textBefore);
+      if (textBefore.trim()) return textBefore.trim();
+    }
+  }
+
+  const fullText = extractTextContent(message.content);
+  if (!fullText.trim()) return '';
+
+  const offset = message.toolTextEndOffset;
+  if (offset && offset > 0 && offset < fullText.length) {
+    return fullText.slice(0, offset).trim();
+  }
+
+  return fullText.trim();
+}
+
 function withAuthToken(url: string) {
   if (!url || url.startsWith('data:') || /[?&]token=/.test(url)) return url;
   if (typeof window === 'undefined') return url;
@@ -453,7 +512,7 @@ function normalizeMessageDocuments(message: any): DocumentInfo[] {
         filename: fileName,
         url: '',
         content: fileContents.get(fp) || '',
-        format: ext === 'md' ? 'markdown' : 'text',
+        format: normalizeGeneratedDocumentFormat(fileName, fileContents.get(fp) || ''),
       });
     }
   }
@@ -701,6 +760,7 @@ interface ModelCatalog {
 interface MessageListProps {
   messages: any[];
   loading: boolean;
+  currentModelString: string;
   expandedMessages: Set<number>;
   editingMessageIdx: number | null;
   editingContent: string;
@@ -719,7 +779,7 @@ interface MessageListProps {
 }
 
 const MessageList = React.memo<MessageListProps>(({
-  messages, loading, expandedMessages, editingMessageIdx, editingContent,
+  messages, loading, currentModelString, expandedMessages, editingMessageIdx, editingContent,
   copiedMessageIdx, compactStatus, onSetEditingContent, onEditCancel, onEditSave,
   onToggleExpand, onResend, onEdit, onCopy, onOpenDocument, onSetMessages,
   messageContentRefs,
@@ -877,80 +937,103 @@ const MessageList = React.memo<MessageListProps>(({
             )
           ) : (
             <div className="px-1 text-claude-text text-[16.5px] leading-normal mt-2">
-              {msg.thinking && assistantHadLongThinking(msg) && (
-                <div className="mb-4">
-                  <div
-                    className="flex items-center gap-2 cursor-pointer select-none group/think text-claude-textSecondary hover:text-claude-text transition-colors"
-                    onClick={() => {
-                      onSetMessages(prev =>
-                        prev.map((m, i) =>
-                          i === idx ? { ...m, isThinkingExpanded: !m.isThinkingExpanded } : m
-                        )
-                      );
-                    }}
-                  >
-                    <AssistantActivityIndicator
-                      phase="waiting"
-                      didLongThinking
-                      size={14}
-                      className="flex-shrink-0"
-                      style={{ opacity: msg.isThinking ? 1 : 0.72 }}
-                    />
-                    <span className={`text-[14px] ${msg.isThinking ? 'font-serif italic text-[#3D3D3A]' : 'text-claude-textSecondary'}`}>
-                      {(() => {
-                        if (msg.isThinking) return 'Thinking deeply, stand by...';
-                        if (msg.thinking_summary) return msg.thinking_summary;
-                        const text = (msg.thinking || '').trim();
-                        const lines = text.split('\n').filter((l: string) => l.trim());
-                        const last = lines[lines.length - 1] || '';
-                        const summary = last.length > 40 ? last.slice(0, 40) + '...' : last;
-                        return summary || 'Thinking...';
-                      })()}
-                    </span>
-                    <ChevronDown size={14} className={`transform transition-transform duration-200 ${msg.isThinkingExpanded ? 'rotate-180' : ''}`} />
-                  </div>
+              {(() => {
+                const isStreamingAssistantTurn = Boolean(loading && idx === messages.length - 1);
+                const messagePresentationModel = resolveMessagePresentationModel(msg, currentModelString, isStreamingAssistantTurn);
+                const shouldUseThinkingModePresentation = isThinkingModel(messagePresentationModel);
+                const shouldUseCompactToolPresentation = !shouldUseThinkingModePresentation && Boolean(
+                  (msg.toolCalls && msg.toolCalls.length > 0) ||
+                  msg.searchStatus ||
+                  (msg.searchLogs && msg.searchLogs.length > 0)
+                );
+                const reasoningTimeline = msg.thinking
+                  ? buildReasoningTimelineEvents(msg.thinking, {
+                      summaryHint: msg.thinking_summary,
+                      toolCalls: msg.toolCalls,
+                      searchLogs: msg.searchLogs,
+                      searchStatus: msg.searchStatus,
+                      isThinking: Boolean(msg.isThinking || isStreamingAssistantTurn),
+                    })
+                  : null;
+                const toolFallbackThinking = !msg.thinking && (shouldUseThinkingModePresentation || shouldUseCompactToolPresentation)
+                  ? buildToolFallbackThinking(msg.toolCalls, {
+                      summaryHint: extractToolSummaryHint(msg),
+                      searchLogs: msg.searchLogs,
+                      searchStatus: msg.searchStatus,
+                    })
+                  : null;
+                const responseFallbackThinking = !msg.thinking && !toolFallbackThinking && !reasoningTimeline && shouldUseThinkingModePresentation
+                  ? buildResponseFallbackThinking(extractTextContent(msg.content))
+                  : null;
+                const fallbackThinking = reasoningTimeline || toolFallbackThinking || responseFallbackThinking;
+                const displayEvents = fallbackThinking?.events;
+                const hasDetailedThinkingEvents = Boolean(
+                  displayEvents?.some((event: any) => typeof event?.detail === 'string' && event.detail.trim().length > 0)
+                );
+                const shouldUseDetailedThinkingPresentation = Boolean(reasoningTimeline?.hasDetailedEvents || hasDetailedThinkingEvents);
+                const showingSyntheticThinking = Boolean(shouldUseThinkingModePresentation && !msg.thinking && fallbackThinking);
+                const syntheticThinkingInFlight = showingSyntheticThinking && loading && idx === messages.length - 1;
+                const displayThinking = shouldUseThinkingModePresentation
+                  ? msg.thinking || fallbackThinking?.thinking || ''
+                  : fallbackThinking?.thinking || '';
+                const displayThinkingSummary = msg.thinking_summary || fallbackThinking?.summary;
+                const displayIsExtended = shouldUseDetailedThinkingPresentation;
+                const defaultExpandedState = displayEvents?.length
+                  ? true
+                  : shouldUseDetailedThinkingPresentation
+                    ? (
+                        Boolean(msg.isThinking) ||
+                        assistantHadLongThinking(msg) ||
+                        showingSyntheticThinking ||
+                        hasDetailedThinkingEvents
+                      )
+                    : false;
+                const displayIsExpanded = Boolean(
+                  msg.isThinkingExpanded ??
+                  defaultExpandedState
+                );
+                const displayChainIsThinking = Boolean(
+                  msg.isThinking ||
+                  syntheticThinkingInFlight ||
+                  (loading && idx === messages.length - 1 && displayEvents?.length)
+                );
 
-                  {msg.isThinkingExpanded && (
-                    <div className="mt-2 ml-1 pl-4 border-l-2 border-claude-border">
-                      <div className="flex flex-col">
-                        <div className="relative">
-                          <div
-                            className="text-claude-textSecondary text-[14px] leading-normal whitespace-pre-wrap overflow-hidden"
-                            style={{ maxHeight: expandedMessages.has(idx) ? 'none' : '300px' }}
-                            ref={(el) => { if (el) messageContentRefs.current.set(idx, el); }}
-                          >
-                            {msg.thinking}
-                          </div>
-                          {!expandedMessages.has(idx) && (() => {
-                            const el = messageContentRefs.current.get(idx);
-                            return el && el.scrollHeight > 300;
-                          })() && (
-                              <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-claude-bg to-transparent pointer-events-none" />
-                            )}
-                        </div>
-                        {(() => {
-                          const el = messageContentRefs.current.get(idx);
-                          const isOverflow = el && el.scrollHeight > 300;
-                          if (!isOverflow) return null;
-                          return (
-                            <div className="pt-1">
-                              <button onClick={() => onToggleExpand(idx)} className="text-[13px] text-claude-text hover:text-claude-textSecondary transition-colors font-medium">
-                                {expandedMessages.has(idx) ? 'Show less' : 'Show more'}
-                              </button>
-                            </div>
-                          );
-                        })()}
-                      </div>
-                      {!msg.isThinking && (
-                        <div className="flex items-center gap-2 mt-2 text-claude-textSecondary">
-                          <Check size={16} />
-                          <span className="text-[14px]">Done</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
+                (msg as any)._usesCompactThoughtChain = Boolean(
+                  shouldUseCompactToolPresentation && displayEvents?.length
+                );
+                (msg as any)._compactActiveEvent = (msg as any)._usesCompactThoughtChain && displayChainIsThinking && displayEvents?.length
+                  ? displayEvents[displayEvents.length - 1]
+                  : null;
+
+                if (!displayThinking && !displayEvents?.length) return null;
+
+                return (
+                <AssistantThinkingChain
+                  thinking={displayThinking}
+                  thinkingSummary={displayThinkingSummary}
+                  isThinking={displayChainIsThinking}
+                  isExtended={displayIsExtended}
+                  isExpanded={displayIsExpanded}
+                  events={displayEvents}
+                  onToggleExpanded={() => {
+                    onSetMessages(prev =>
+                      prev.map((m, i) =>
+                        i === idx
+                          ? {
+                              ...m,
+                              isThinkingExpanded: !(
+                                m.isThinkingExpanded ??
+                                m.isThinking ??
+                                showingSyntheticThinking
+                              ),
+                            }
+                          : m
+                      )
+                    );
+                  }}
+                />
+                );
+              })()}
               {/* Research badge */}
               {msg.research && (
                 <button
@@ -978,8 +1061,29 @@ const MessageList = React.memo<MessageListProps>(({
               )}
               {/* Tool calls display */}
               {msg.toolCalls && msg.toolCalls.length > 0 && (() => {
-                const FRONTEND_HIDDEN = new Set(['WebSearch', 'WebFetch']);
-                const visibleToolCalls = msg.toolCalls.filter((tc: any) => !FRONTEND_HIDDEN.has(tc.name));
+                const isStreamingAssistantTurn = Boolean(loading && idx === messages.length - 1);
+                const messagePresentationModel = resolveMessagePresentationModel(msg, currentModelString, isStreamingAssistantTurn);
+                const shouldUseThinkingModePresentation = isThinkingModel(messagePresentationModel);
+                const shouldUseCompactToolPresentation = !shouldUseThinkingModePresentation && Boolean(
+                  (msg.toolCalls && msg.toolCalls.length > 0) ||
+                  msg.searchStatus ||
+                  (msg.searchLogs && msg.searchLogs.length > 0)
+                );
+                if (shouldUseThinkingModePresentation || shouldUseCompactToolPresentation) {
+                  const fullText = extractTextContent(msg.content);
+                  const offset = msg.toolTextEndOffset;
+                  const hasOffset = offset && offset > 0 && offset < fullText.length;
+                  const finalText = hasOffset ? fullText.slice(offset).trim() : '';
+                  const isCurrentlyStreaming = loading && idx === messages.length - 1;
+                  (msg as any)._finalText = shouldUseCompactToolPresentation
+                    ? isCurrentlyStreaming
+                      ? ''
+                      : (hasOffset ? finalText : fullText)
+                    : extractTextContent(msg.content);
+                  return null;
+                }
+
+                const visibleToolCalls = msg.toolCalls.filter((tc: any) => !HIDDEN_TOOL_NAMES.has(tc.name));
                 if (visibleToolCalls.length === 0) return null;
                 const isCurrentMsg = idx === messages.length - 1;
                 const isStale = (!loading && isCurrentMsg) || (idx < messages.length - 1);
@@ -1008,12 +1112,7 @@ const MessageList = React.memo<MessageListProps>(({
                   : (hasOffset ? finalText : null);
 
                 const toolNames = visibleToolCalls.map((tc: any) => {
-                  const nameMap: Record<string, string> = {
-                    'Read': 'Read file', 'Write': 'Write file', 'Edit': 'Edit file',
-                    'Bash': 'Run command', 'ListDir': 'List directory',
-                    'MultiEdit': 'Edit files', 'Search': 'Search',
-                  };
-                  return nameMap[tc.name] || tc.name;
+                  return getToolDisplayName(tc.name);
                 });
                 const uniqueNames = [...new Set(toolNames)];
                 const allDone = visibleToolCalls.every((tc: any) => {
@@ -1150,7 +1249,7 @@ const MessageList = React.memo<MessageListProps>(({
                   </div>
                 );
               })()}
-              {msg.searchStatus && (!msg.searchLogs || msg.searchLogs.length === 0) && (!msg.content || msg.content.length === (msg._contentLenBeforeSearch || 0)) && loading && idx === messages.length - 1 && (
+              {!isThinkingModel(resolveMessagePresentationModel(msg, currentModelString, Boolean(loading && idx === messages.length - 1))) && !(msg as any)._usesCompactThoughtChain && msg.searchStatus && (!msg.searchLogs || msg.searchLogs.length === 0) && (!msg.content || msg.content.length === (msg._contentLenBeforeSearch || 0)) && loading && idx === messages.length - 1 && (
                 <div className="flex items-center justify-center gap-2 text-[15px] font-medium mb-4 w-full">
                   <Globe size={18} className="text-claude-textSecondary" />
                   <span className="animate-shimmer-text">
@@ -1159,7 +1258,7 @@ const MessageList = React.memo<MessageListProps>(({
                 </div>
               )}
 
-              {msg.searchLogs && msg.searchLogs.length > 0 && (
+              {!isThinkingModel(resolveMessagePresentationModel(msg, currentModelString, Boolean(loading && idx === messages.length - 1))) && !(msg as any)._usesCompactThoughtChain && msg.searchLogs && msg.searchLogs.length > 0 && (
                 <SearchProcess logs={msg.searchLogs} isThinking={msg.isThinking} isDone={(msg.content || '').length > (msg._contentLenBeforeSearch || 0)} />
               )}
 
@@ -1168,17 +1267,35 @@ const MessageList = React.memo<MessageListProps>(({
               )}
 
               <MarkdownRenderer content={(msg as any)._finalText ?? extractTextContent(msg.content)} citations={msg.citations} />
-              {normalizeMessageDocuments(msg).length > 0 && (
-                <div className="mt-2 mb-1 space-y-2">
-                  {normalizeMessageDocuments(msg).map((doc, docIdx) => (
-                    <DocumentCard
-                      key={doc.id || `${idx}-${docIdx}`}
-                      document={doc}
-                      onOpen={(openedDoc) => onOpenDocument?.(openedDoc)}
-                    />
-                  ))}
-                </div>
-              )}
+              {(() => {
+                const compactActiveEvent = (msg as any)._compactActiveEvent;
+                if (!(msg as any)._usesCompactThoughtChain || !compactActiveEvent) return null;
+
+                return (
+                  <AssistantThinkingCompactStatus
+                    event={compactActiveEvent}
+                    isThinking={Boolean(loading && idx === messages.length - 1)}
+                  />
+                );
+              })()}
+              {(() => {
+                const documents = normalizeMessageDocuments(msg);
+                if (documents.length === 0) return null;
+                const stackedPreview = documents.length > 1;
+
+                return (
+                  <div className="mt-2 mb-1 space-y-2">
+                    {documents.map((doc, docIdx) => (
+                      <DocumentCard
+                        key={doc.id || `${idx}-${docIdx}`}
+                        document={doc}
+                        onOpen={(openedDoc) => onOpenDocument?.(openedDoc)}
+                        stackedPreview={stackedPreview}
+                      />
+                    ))}
+                  </div>
+                );
+              })()}
               {msg.codeExecution && (
                 <CodeExecution
                   code={msg.codeExecution.code}
@@ -1200,6 +1317,7 @@ const MessageList = React.memo<MessageListProps>(({
               )}
               {(() => {
                 const isLastMessage = idx === messages.length - 1;
+                const compactActiveEvent = (msg as any)._compactActiveEvent;
                 const hasDocumentDrafts = normalizeDocumentDrafts(msg).length > 0;
                 const hasToolCalls = Boolean(msg.toolCalls && msg.toolCalls.length > 0);
                 const didLongThinking = assistantHadLongThinking(msg);
@@ -1214,13 +1332,14 @@ const MessageList = React.memo<MessageListProps>(({
                         : null;
 
                 if (!tailPhase) return null;
+                if (compactActiveEvent && tailPhase !== 'done') return null;
 
                 const tailIndicator = (
-                  <span className="inline-flex ml-1 align-middle" style={{ verticalAlign: '-0.18em' }}>
+                  <span className="inline-flex ml-1.5 align-middle" style={{ verticalAlign: '-0.18em' }}>
                     <AssistantActivityIndicator
                       phase={tailPhase}
                       didLongThinking={didLongThinking}
-                      size={24}
+                      size={28}
                       interactive={tailPhase === 'done'}
                       className="inline-block"
                     />
@@ -1230,7 +1349,9 @@ const MessageList = React.memo<MessageListProps>(({
                 if (tailPhase === 'done') {
                   return (
                     <>
-                      {tailIndicator}
+                      <div className="mt-3 flex items-start">
+                        {tailIndicator}
+                      </div>
                       {compactStatus.state === 'compacting' && (
                         <div className="mt-3">
                           <CompactingStatus />
@@ -1295,7 +1416,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const selfHostedModels = useMemo<SelectableModel[]>(() => {
     if (!isSelfHostedMode) return [];
     try {
-      const chatModels = JSON.parse(localStorage.getItem('chat_models') || '[]');
+      const chatModels = sanitizeSelfHostedChatModels(JSON.parse(localStorage.getItem('chat_models') || '[]'));
       if (chatModels.length === 0) return [];
       const tierDescMap: Record<string, string> = {
         'opus': 'Most capable for ambitious work',
@@ -1433,7 +1554,11 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       // Tail is a user message (or other non-assistant). Backfill an assistant
       // placeholder so the trailing SSE event has somewhere to land instead of
       // being silently dropped by the updater's `lastMsg.role === 'assistant'` guard.
-      return updater([...prev, createAssistantPlaceholder()]);
+      const placeholderModel = getStoredMessageModel(last);
+      return updater([
+        ...prev,
+        createAssistantPlaceholder(placeholderModel ? { model: placeholderModel } : {}),
+      ]);
     };
 
     if (viewingIdRef.current === convId) {
@@ -1791,7 +1916,12 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         if (isSelfHosted) {
           // Self-hosted: use chat_models from localStorage (configured in Models settings)
           let chatModels: any[] = [];
-          try { chatModels = JSON.parse(localStorage.getItem('chat_models') || '[]'); } catch {}
+          let rawChatModels: any[] = [];
+          try { rawChatModels = JSON.parse(localStorage.getItem('chat_models') || '[]'); } catch {}
+          chatModels = sanitizeSelfHostedChatModels(rawChatModels);
+          if (JSON.stringify(rawChatModels) !== JSON.stringify(chatModels)) {
+            localStorage.setItem('chat_models', JSON.stringify(chatModels));
+          }
           if (chatModels.length > 0) {
             const tierDescMap: Record<string, string> = {
               'opus': 'Most capable for ambitious work',
@@ -1808,12 +1938,24 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             // Common = tier models (opus/sonnet/haiku), ordered by tier
             const tierOrder = ['opus', 'sonnet', 'haiku'];
             const common = tierOrder.map(t => all.find((m: any) => m.tier === t)).filter(Boolean);
-            data = { all, common: common.length > 0 ? common : all, fallback_model: localStorage.getItem('default_model') || all[0]?.id || 'claude-sonnet-4-6' };
+            const savedSelfHostedDefault = stripThinking(localStorage.getItem('default_model') || '');
+            const validSelfHostedDefault = all.find((m: any) => m.id === savedSelfHostedDefault && Number(m.enabled) === 1)?.id;
+            const availableSelfHostedFallback = all.find((m: any) => /sonnet/i.test(m.id) && Number(m.enabled) === 1)?.id
+              || all.find((m: any) => Number(m.enabled) === 1)?.id
+              || 'claude-sonnet-4-6';
+            data = {
+              all,
+              common: common.length > 0 ? common : all,
+              fallback_model: validSelfHostedDefault || availableSelfHostedFallback,
+            };
           } else {
             // Fallback: load all from providers
             const pModels = await getProviderModels();
             const all = pModels.map(m => ({ id: m.id, name: m.name || m.id, enabled: 1 }));
-            data = { all, common: all, fallback_model: all[0]?.id || 'claude-sonnet-4-6' };
+            const availableSelfHostedFallback = all.find((m: any) => /sonnet/i.test(m.id) && Number(m.enabled) === 1)?.id
+              || all.find((m: any) => Number(m.enabled) === 1)?.id
+              || 'claude-sonnet-4-6';
+            data = { all, common: all, fallback_model: availableSelfHostedFallback };
           }
         } else {
           data = await getUserModels();
@@ -1948,7 +2090,11 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
               const msgs = prev.length > 0 ? prev : [];
               // Add assistant placeholder if last message isn't one
               if (msgs.length === 0 || msgs[msgs.length - 1].role !== 'assistant') {
-                const withPlaceholder = [...msgs, createAssistantPlaceholder()];
+                const lastModel = msgs.length > 0 ? getStoredMessageModel(msgs[msgs.length - 1]) : '';
+                const withPlaceholder = [
+                  ...msgs,
+                  createAssistantPlaceholder(lastModel ? { model: lastModel } : { model: currentModelString }),
+                ];
                 messagesBufferRef.current.set(convId, withPlaceholder);
                 return withPlaceholder;
               }
@@ -2518,8 +2664,16 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       inputRef.current.style.overflowY = 'hidden';
     }
 
+    const turnModelString = activeId
+      ? currentModelString
+      : (
+          isModelSelectable(currentModelString)
+            ? currentModelString
+            : resolveModelForNewChat(currentModelString)
+        );
+
     // Optimistic UI: Add user message immediately
-    const tempUserMsg: any = { role: 'user', content: userMessageText, created_at: new Date().toISOString() };
+    const tempUserMsg: any = { role: 'user', content: userMessageText, created_at: new Date().toISOString(), model: turnModelString };
     if (optimisticAttachments.length > 0) {
       tempUserMsg.has_attachments = 1;
       tempUserMsg.attachments = optimisticAttachments;
@@ -2531,7 +2685,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     setTimeout(() => scrollToBottom('auto'), 50);
 
     // Prepare assistant message placeholder
-    setMessages(prev => [...prev, createAssistantPlaceholder()]);
+    setMessages(prev => [...prev, createAssistantPlaceholder({ model: turnModelString })]);
 
     let conversationId = activeId;
 
@@ -2539,9 +2693,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     if (!conversationId) {
       isCreatingRef.current = true; // Block useEffect fetch
       try {
-        const modelForCreate = isModelSelectable(currentModelString)
-          ? currentModelString
-          : resolveModelForNewChat(currentModelString);
+        const modelForCreate = turnModelString;
         if (modelForCreate !== currentModelString) {
           setCurrentModelString(modelForCreate);
         }
@@ -2593,7 +2745,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     }
 
     // Call streaming API — seed buffer with current messages so background streaming works
-    messagesBufferRef.current.set(conversationId!, [...messages, tempUserMsg, createAssistantPlaceholder()]);
+    messagesBufferRef.current.set(
+      conversationId!,
+      [...messages, tempUserMsg, createAssistantPlaceholder({ model: tempUserMsg.model })]
+    );
     const controller = new AbortController();
     const streamRequestId = beginStreamSession(conversationId!);
     abortControllerRef.current = controller;
@@ -3074,7 +3229,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     }
     const msg = messages[idx];
     const { attachmentIds, attachmentsPayload, optimisticAttachments } = extractMessageAttachments(msg);
-    const tempUserMsg: any = { role: 'user', content, created_at: new Date().toISOString() };
+    const tempUserMsg: any = { role: 'user', content, created_at: new Date().toISOString(), model: currentModelString };
     if (optimisticAttachments.length > 0) {
       tempUserMsg.has_attachments = 1;
       tempUserMsg.attachments = optimisticAttachments;
@@ -3083,7 +3238,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     setMessages(prev => [
       ...prev.slice(0, idx),
       tempUserMsg,
-      createAssistantPlaceholder(),
+      createAssistantPlaceholder({ model: tempUserMsg.model }),
     ]);
     // 删除后端消息（regenerate）
     if (activeId) {
@@ -3266,7 +3421,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     setEditingMessageIdx(null);
     setEditingContent('');
 
-    const tempUserMsg: any = { role: 'user', content: newContent, created_at: new Date().toISOString() };
+    const tempUserMsg: any = { role: 'user', content: newContent, created_at: new Date().toISOString(), model: currentModelString };
     if (optimisticAttachments.length > 0) {
       tempUserMsg.has_attachments = 1;
       tempUserMsg.attachments = optimisticAttachments;
@@ -3276,7 +3431,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     setMessages(prev => [
       ...prev.slice(0, idx),
       tempUserMsg,
-      createAssistantPlaceholder(),
+      createAssistantPlaceholder({ model: tempUserMsg.model }),
     ]);
 
     // 删除后端消息（regenerate）
@@ -3721,6 +3876,169 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const landingPlusMenuItemClass = "flex h-[32px] w-full items-center gap-[8px] rounded-[8px] px-[8px] py-[6px] text-left transition-colors hover:bg-[#F5F4F1] dark:hover:bg-white/5";
   const landingPlusMenuTextClass = "text-[14px] leading-[20px] tracking-[-0.1504px] text-[#121212] dark:text-claude-text";
   const landingPlusMenuSubmenuClass = "absolute left-full top-0 ml-2 z-50 w-[218px] max-h-[30vh] overflow-y-auto rounded-[12px] border border-[rgba(31,31,30,0.3)] dark:border-white/15 bg-white dark:bg-claude-input px-[7px] pb-px pt-[7px] shadow-[0_2px_8px_rgba(0,0,0,0.08)]";
+  const conversationPlusMenuShellClass = "absolute bottom-full left-0 mb-2 z-50 w-[218px] rounded-[12px] border border-[rgba(31,31,30,0.3)] dark:border-white/15 bg-white dark:bg-claude-input px-[7px] pb-px pt-[7px] shadow-[0_2px_8px_rgba(0,0,0,0.08)]";
+  const conversationPlusMenuSubmenuClass = "absolute left-full bottom-0 ml-2 z-50 w-[218px] max-h-[30vh] overflow-y-auto rounded-[12px] border border-[rgba(31,31,30,0.3)] dark:border-white/15 bg-white dark:bg-claude-input px-[7px] pb-px pt-[7px] shadow-[0_2px_8px_rgba(0,0,0,0.08)]";
+  const landingSendButtonClass = "flex h-[32px] w-[40px] items-center justify-center rounded-[8px] border border-transparent bg-[#efcbc0] text-white transition-colors hover:bg-[#e7bcaf] dark:border-[#4F4540] dark:bg-[#34312E] dark:text-[#F5D7CA] dark:hover:bg-[#3E3935] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] disabled:cursor-not-allowed disabled:opacity-40";
+  const conversationSendButtonClass = "p-2 rounded-lg border border-transparent bg-[#C6613F] text-white transition-colors hover:bg-[#D97757] dark:border-[#4F4540] dark:bg-[#34312E] dark:text-[#F5D7CA] dark:hover:bg-[#3E3935] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] disabled:opacity-40 disabled:cursor-not-allowed";
+
+  const renderSharedPlusMenu = (shellClass: string, submenuClass: string) => (
+    <div
+      ref={plusMenuRef}
+      className={shellClass}
+    >
+      <button
+        onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
+        onClick={() => { closePlusMenu(); fileInputRef.current?.click(); }}
+        className={landingPlusMenuItemClass}
+      >
+        <img src={plusMenuAttachIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
+        <span className={landingPlusMenuTextClass}>Add files or photos</span>
+      </button>
+      <button
+        onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
+        onClick={closePlusMenu}
+        className={landingPlusMenuItemClass}
+      >
+        <img src={plusMenuScreenshotIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
+        <span className={landingPlusMenuTextClass}>Take a screenshot</span>
+      </button>
+      <div className="relative" onMouseLeave={() => setShowProjectsSubmenu(false)}>
+        <button
+          onMouseEnter={() => { setShowProjectsSubmenu(true); setShowSkillsSubmenu(false); }}
+          onClick={() => setShowProjectsSubmenu(prev => !prev)}
+          className={`${landingPlusMenuItemClass} justify-between`}
+        >
+          <div className="flex items-center gap-[8px]">
+            <img src={plusMenuProjectIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
+            <span className={landingPlusMenuTextClass}>Add to project</span>
+          </div>
+          <img src={plusMenuChevronIcon} alt="" aria-hidden="true" className="h-[16px] w-[16px] shrink-0 dark:invert dark:brightness-150" />
+        </button>
+        {showProjectsSubmenu && (
+          <div className={submenuClass}>
+            {projectList.length > 0 ? projectList.map(p => {
+              const isSelected = (activeId && currentProjectId === p.id) || (!activeId && pendingProjectId === p.id);
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => handleAttachToProject(p)}
+                  className="flex h-[32px] w-full items-center justify-between gap-2 rounded-[8px] px-[8px] text-left transition-colors hover:bg-[#F5F4F1] dark:hover:bg-white/5"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <IconProjects size={20} className="text-claude-textSecondary shrink-0 dark:[filter:brightness(0)_invert(1)_brightness(0.68)_sepia(0.18)]" />
+                    <span className="truncate text-[14px] leading-[20px] tracking-[-0.1504px] text-[#121212] dark:text-claude-text">{p.name}</span>
+                  </div>
+                  {isSelected && <Check size={14} className="shrink-0 text-[#2977D6]" />}
+                </button>
+              );
+            }) : (
+              <div className="px-[8px] py-[6px] text-[13px] italic text-[#7B7974] dark:text-claude-textSecondary">No projects yet</div>
+            )}
+            <div className="mx-[8px] my-[7px] h-px bg-[rgba(31,31,30,0.15)] dark:bg-white/10" />
+            <button
+              onClick={() => {
+                setShowProjectsSubmenu(false);
+                closePlusMenu();
+                setNewProjectName('');
+                setNewProjectDescription('');
+                setShowNewProjectDialog(true);
+              }}
+              className="flex h-[32px] w-full items-center gap-[8px] rounded-[8px] px-[8px] text-left transition-colors hover:bg-[#F5F4F1] dark:hover:bg-white/5"
+            >
+              <Plus size={14} className="text-[#7B7974] dark:text-claude-textSecondary" />
+              <span className="text-[14px] leading-[20px] tracking-[-0.1504px] text-[#121212] dark:text-claude-text">Start a new project</span>
+            </button>
+          </div>
+        )}
+      </div>
+      <div className="mx-[8px] my-[7px] h-px bg-[rgba(31,31,30,0.15)] dark:bg-white/10" />
+      <div className="relative" onMouseLeave={() => setShowSkillsSubmenu(false)}>
+        <button
+          onMouseEnter={() => { setShowSkillsSubmenu(true); setShowProjectsSubmenu(false); }}
+          onClick={() => setShowSkillsSubmenu(prev => !prev)}
+          className={`${landingPlusMenuItemClass} justify-between`}
+        >
+          <div className="flex items-center gap-[8px]">
+            <img src={plusMenuSkillsIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
+            <span className={landingPlusMenuTextClass}>Skills</span>
+          </div>
+          <img src={plusMenuChevronIcon} alt="" aria-hidden="true" className="h-[16px] w-[16px] shrink-0 dark:invert dark:brightness-150" />
+        </button>
+        {showSkillsSubmenu && (
+          <div className={submenuClass}>
+            {enabledSkills.length > 0 ? enabledSkills.map(skill => (
+              <button
+                key={skill.id}
+                onClick={() => {
+                  closePlusMenu();
+                  const slug = skill.name.toLowerCase().replace(/\s+/g, '-');
+                  setSelectedSkill({ name: skill.name, slug, description: skill.description });
+                  setInputText(prev => prev ? `/${slug} ${prev}` : `/${slug} `);
+                  inputRef.current?.focus();
+                }}
+                className="flex h-[32px] w-full items-center rounded-[8px] px-[8px] text-left transition-colors hover:bg-[#F5F4F1] dark:hover:bg-white/5"
+              >
+                <span className="truncate text-[14px] leading-[20px] tracking-[-0.1504px] text-[#121212] dark:text-claude-text">{skill.name}</span>
+              </button>
+            )) : (
+              <div className="px-[8px] py-[6px] text-[13px] italic text-[#7B7974] dark:text-claude-textSecondary">No skills enabled</div>
+            )}
+            <div className="mx-[8px] my-[7px] h-px bg-[rgba(31,31,30,0.15)] dark:bg-white/10" />
+            <button
+              onClick={() => {
+                closePlusMenu();
+                window.location.hash = '#/customize';
+              }}
+              className="flex h-[32px] w-full items-center gap-[8px] rounded-[8px] px-[8px] text-left transition-colors hover:bg-[#F5F4F1] dark:hover:bg-white/5"
+            >
+              <img src={plusMenuSkillsIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
+              <span className="text-[14px] leading-[20px] tracking-[-0.1504px] text-[#121212] dark:text-claude-text">Manage skills</span>
+            </button>
+          </div>
+        )}
+      </div>
+      <button
+        onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
+        onClick={() => { closePlusMenu(); navigate('/customize'); }}
+        className={landingPlusMenuItemClass}
+      >
+        <img src={plusMenuConnectorsIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
+        <span className={landingPlusMenuTextClass}>Add connectors</span>
+      </button>
+      <div className="mx-[8px] my-[7px] h-px bg-[rgba(31,31,30,0.15)] dark:bg-white/10" />
+      <button
+        onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
+        onClick={() => {
+          if (currentProviderSupportsWebSearch) {
+            closePlusMenu();
+          } else {
+            setWebSearchToast('当前模型的供应商不支持网页搜索');
+            closePlusMenu();
+          }
+        }}
+        className={`${landingPlusMenuItemClass} justify-between`}
+      >
+        <div className="flex items-center gap-[8px]">
+          <img src={plusMenuWebSearchIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0" />
+          <span className={`text-[14px] leading-[20px] tracking-[-0.1504px] ${currentProviderSupportsWebSearch ? 'text-[#2977D6] dark:text-[#3B8BE5]' : 'text-[#121212] dark:text-claude-text'}`}>Web search</span>
+        </div>
+        {currentProviderSupportsWebSearch ? (
+          <img src={plusMenuCheckIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0" />
+        ) : null}
+      </button>
+      <button
+        onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
+        onClick={closePlusMenu}
+        className={`${landingPlusMenuItemClass} justify-between`}
+      >
+        <div className="flex items-center gap-[8px]">
+          <img src={plusMenuStyleIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
+          <span className={landingPlusMenuTextClass}>Use style</span>
+        </div>
+        <img src={plusMenuChevronIcon} alt="" aria-hidden="true" className="h-[16px] w-[16px] shrink-0 dark:invert dark:brightness-150" />
+      </button>
+    </div>
+  );
 
   // Shared overlays rendered in both MODE 1 and MODE 2
   const sharedProjectOverlays = (
@@ -3864,7 +4182,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                       />
                       <textarea
                         ref={inputRef}
-                        className={`w-full pl-[6px] pr-0 pt-[4px] pb-0 placeholder:text-[#7b7974] text-[16px] leading-[24px] tracking-[-0.3125px] outline-none resize-none overflow-hidden bg-transparent font-sans font-normal ${inputText.match(/^\/[a-zA-Z0-9_-]+/) ? 'text-transparent caret-claude-text' : 'text-[#373734]'}`}
+                        className={`w-full pl-[6px] pr-0 pt-[4px] pb-0 placeholder:text-[#7b7974] dark:placeholder:text-claude-textSecondary text-[16px] leading-[24px] tracking-[-0.3125px] outline-none resize-none overflow-hidden bg-transparent font-sans font-normal ${inputText.match(/^\/[a-zA-Z0-9_-]+/) ? 'text-transparent caret-claude-text' : 'text-[#373734] dark:text-claude-text'}`}
                         style={{ minHeight: '48px' }}
                         placeholder={selectedSkill ? `Describe what you want ${selectedSkill.name} to do...` : "How can I help you today?"}
                         value={inputText}
@@ -3901,164 +4219,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                       >
                         <img src={inputPlusIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] dark:invert dark:brightness-200" />
                       </button>
-                      {showPlusMenu && (
-                        <div
-                          ref={plusMenuRef}
-                          className={landingPlusMenuShellClass}
-                        >
-                          <button
-                            onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
-                            onClick={() => { closePlusMenu(); fileInputRef.current?.click(); }}
-                            className={landingPlusMenuItemClass}
-                          >
-                            <img src={plusMenuAttachIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
-                            <span className={landingPlusMenuTextClass}>Add files or photos</span>
-                          </button>
-                          <button
-                            onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
-                            onClick={closePlusMenu}
-                            className={landingPlusMenuItemClass}
-                          >
-                            <img src={plusMenuScreenshotIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
-                            <span className={landingPlusMenuTextClass}>Take a screenshot</span>
-                          </button>
-                          <div className="relative" onMouseLeave={() => setShowProjectsSubmenu(false)}>
-                            <button
-                              onMouseEnter={() => { setShowProjectsSubmenu(true); setShowSkillsSubmenu(false); }}
-                              onClick={() => setShowProjectsSubmenu(prev => !prev)}
-                              className={`${landingPlusMenuItemClass} justify-between`}
-                            >
-                              <div className="flex items-center gap-[8px]">
-                                <img src={plusMenuProjectIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
-                                <span className={landingPlusMenuTextClass}>Add to project</span>
-                              </div>
-                              <img src={plusMenuChevronIcon} alt="" aria-hidden="true" className="h-[16px] w-[16px] shrink-0 dark:invert dark:brightness-150" />
-                            </button>
-                            {showProjectsSubmenu && (
-                              <div className={landingPlusMenuSubmenuClass}>
-                                {projectList.length > 0 ? projectList.map(p => {
-                                  const isSelected = (activeId && currentProjectId === p.id) || (!activeId && pendingProjectId === p.id);
-                                  return (
-                                    <button
-                                      key={p.id}
-                                      onClick={() => handleAttachToProject(p)}
-                                      className="flex h-[32px] w-full items-center justify-between gap-2 rounded-[8px] px-[8px] text-left transition-colors hover:bg-[#F5F4F1] dark:hover:bg-white/5"
-                                    >
-                                      <div className="flex min-w-0 items-center gap-2">
-                                        <IconProjects size={20} className="text-claude-textSecondary shrink-0 dark:[filter:brightness(0)_invert(1)_brightness(0.68)_sepia(0.18)]" />
-                                        <span className="truncate text-[14px] leading-[20px] tracking-[-0.1504px] text-[#121212] dark:text-claude-text">{p.name}</span>
-                                      </div>
-                                      {isSelected && <Check size={14} className="shrink-0 text-[#2977D6]" />}
-                                    </button>
-                                  );
-                                }) : (
-                                  <div className="px-[8px] py-[6px] text-[13px] italic text-[#7B7974]">No projects yet</div>
-                                )}
-                                <div className="mx-[8px] my-[7px] h-px bg-[rgba(31,31,30,0.15)] dark:bg-white/10" />
-                                <button
-                                  onClick={() => {
-                                    setShowProjectsSubmenu(false);
-                                    closePlusMenu();
-                                    setNewProjectName('');
-                                    setNewProjectDescription('');
-                                    setShowNewProjectDialog(true);
-                                  }}
-                                  className="flex h-[32px] w-full items-center gap-[8px] rounded-[8px] px-[8px] text-left transition-colors hover:bg-[#F5F4F1] dark:hover:bg-white/5"
-                                >
-                                  <Plus size={14} className="text-[#7B7974] dark:text-claude-textSecondary" />
-                                  <span className="text-[14px] leading-[20px] tracking-[-0.1504px] text-[#121212] dark:text-claude-text">Start a new project</span>
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                          <div className="mx-[8px] my-[7px] h-px bg-[rgba(31,31,30,0.15)] dark:bg-white/10" />
-                          <div className="relative" onMouseLeave={() => setShowSkillsSubmenu(false)}>
-                            <button
-                              onMouseEnter={() => { setShowSkillsSubmenu(true); setShowProjectsSubmenu(false); }}
-                              onClick={() => setShowSkillsSubmenu(prev => !prev)}
-                              className={`${landingPlusMenuItemClass} justify-between`}
-                            >
-                              <div className="flex items-center gap-[8px]">
-                                <img src={plusMenuSkillsIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
-                                <span className={landingPlusMenuTextClass}>Skills</span>
-                              </div>
-                              <img src={plusMenuChevronIcon} alt="" aria-hidden="true" className="h-[16px] w-[16px] shrink-0 dark:invert dark:brightness-150" />
-                            </button>
-                            {showSkillsSubmenu && (
-                              <div className={landingPlusMenuSubmenuClass}>
-                                {enabledSkills.length > 0 ? enabledSkills.map(skill => (
-                                  <button
-                                    key={skill.id}
-                                    onClick={() => {
-                                      closePlusMenu();
-                                      const slug = skill.name.toLowerCase().replace(/\s+/g, '-');
-                                      setSelectedSkill({ name: skill.name, slug, description: skill.description });
-                                      setInputText(prev => prev ? `/${slug} ${prev}` : `/${slug} `);
-                                      inputRef.current?.focus();
-                                    }}
-                                    className="flex h-[32px] w-full items-center rounded-[8px] px-[8px] text-left transition-colors hover:bg-[#F5F4F1] dark:hover:bg-white/5"
-                                  >
-                                    <span className="truncate text-[14px] leading-[20px] tracking-[-0.1504px] text-[#121212] dark:text-claude-text">{skill.name}</span>
-                                  </button>
-                                )) : (
-                                  <div className="px-[8px] py-[6px] text-[13px] italic text-[#7B7974] dark:text-claude-textSecondary">No skills enabled</div>
-                                )}
-                                <div className="mx-[8px] my-[7px] h-px bg-[rgba(31,31,30,0.15)] dark:bg-white/10" />
-                                <button
-                                  onClick={() => {
-                                    closePlusMenu();
-                                    window.location.hash = '#/customize';
-                                  }}
-                                  className="flex h-[32px] w-full items-center gap-[8px] rounded-[8px] px-[8px] text-left transition-colors hover:bg-[#F5F4F1] dark:hover:bg-white/5"
-                                >
-                                  <img src={plusMenuSkillsIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
-                                  <span className="text-[14px] leading-[20px] tracking-[-0.1504px] text-[#121212] dark:text-claude-text">Manage skills</span>
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                          <button
-                            onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
-                            onClick={() => { closePlusMenu(); navigate('/customize'); }}
-                            className={landingPlusMenuItemClass}
-                          >
-                            <img src={plusMenuConnectorsIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
-                            <span className={landingPlusMenuTextClass}>Add connectors</span>
-                          </button>
-                          <div className="mx-[8px] my-[7px] h-px bg-[rgba(31,31,30,0.15)] dark:bg-white/10" />
-                          <button
-                            onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
-                            onClick={() => {
-                              if (currentProviderSupportsWebSearch) {
-                                closePlusMenu();
-                              } else {
-                                setWebSearchToast('当前模型的供应商不支持网页搜索');
-                                closePlusMenu();
-                              }
-                            }}
-                            className={`${landingPlusMenuItemClass} justify-between`}
-                          >
-                            <div className="flex items-center gap-[8px]">
-                              <img src={plusMenuWebSearchIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0" />
-                              <span className={`text-[14px] leading-[20px] tracking-[-0.1504px] ${currentProviderSupportsWebSearch ? 'text-[#2977D6] dark:text-[#3B8BE5]' : 'text-[#121212] dark:text-claude-text'}`}>Web search</span>
-                            </div>
-                            {currentProviderSupportsWebSearch ? (
-                              <img src={plusMenuCheckIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0" />
-                            ) : null}
-                          </button>
-                          <button
-                            onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
-                            onClick={closePlusMenu}
-                            className={`${landingPlusMenuItemClass} justify-between`}
-                          >
-                            <div className="flex items-center gap-[8px]">
-                              <img src={plusMenuStyleIcon} alt="" aria-hidden="true" className="h-[20px] w-[20px] shrink-0 dark:invert dark:brightness-200" />
-                              <span className={landingPlusMenuTextClass}>Use style</span>
-                            </div>
-                            <img src={plusMenuChevronIcon} alt="" aria-hidden="true" className="h-[16px] w-[16px] shrink-0 dark:invert dark:brightness-150" />
-                          </button>
-                        </div>
-                      )}
+                      {showPlusMenu && renderSharedPlusMenu(landingPlusMenuShellClass, landingPlusMenuSubmenuClass)}
                       {/* Blue research badge next to + button when enabled */}
                       {researchMode && (
                         <div className="group/research relative ml-1 flex items-center bg-[#DBEAFE] dark:bg-[#1E3A5F] rounded-lg p-1.5">
@@ -4092,7 +4253,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                           onMouseDown={(e) => e.preventDefault()}
                           onClick={handleSend}
                           disabled={!canSend}
-                          className="flex h-[32px] w-[40px] items-center justify-center rounded-[8px] bg-[#efcbc0] text-white transition-colors hover:bg-[#e7bcaf] disabled:cursor-not-allowed disabled:opacity-40"
+                          className={landingSendButtonClass}
                         >
                           <ArrowUp size={18} strokeWidth={2.3} />
                         </button>
@@ -4207,6 +4368,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             <MessageList
               messages={messages}
               loading={loading}
+              currentModelString={currentModelString}
               expandedMessages={expandedMessages}
               editingMessageIdx={editingMessageIdx}
               editingContent={editingContent}
@@ -4299,198 +4461,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                     >
                       <IconPlus size={20} />
                     </button>
-                    {showPlusMenu && (
-                      <div
-                        ref={plusMenuRef}
-                        className="absolute bottom-full left-0 mb-2 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50"
-                      >
-                        <button
-                          onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
-                          onClick={() => {
-                            setShowPlusMenu(false);
-                            fileInputRef.current?.click();
-                          }}
-                          className="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
-                        >
-                          <Paperclip size={16} className="text-claude-textSecondary" />
-                          Add files or photos
-                        </button>
-                        <button
-                          onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
-                          onClick={() => {
-                            setShowPlusMenu(false);
-                            setShowGithubModal(true);
-                          }}
-                          className="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
-                        >
-                          <Github size={16} className="text-claude-textSecondary" />
-                          Add from GitHub
-                        </button>
-                        {/* Add to project submenu */}
-                        <div className="relative" onMouseLeave={() => setShowProjectsSubmenu(false)}>
-                          <button
-                            onMouseEnter={() => { setShowProjectsSubmenu(true); setShowSkillsSubmenu(false); }}
-                            onClick={() => setShowProjectsSubmenu(prev => !prev)}
-                            className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
-                          >
-                            <div className="flex items-center gap-3">
-                              <IconProjects size={16} className="text-claude-textSecondary scale-[1.6] dark:[filter:brightness(0)_invert(1)_brightness(0.68)_sepia(0.18)]" />
-                              Add to project
-                            </div>
-                            <ChevronDown size={14} className="text-claude-textSecondary -rotate-90" />
-                          </button>
-                          {showProjectsSubmenu && (
-                            <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[30vh] overflow-y-auto">
-                              {projectList.length > 0 ? projectList.map(p => {
-                                const isSelected = (activeId && currentProjectId === p.id) || (!activeId && pendingProjectId === p.id);
-                                return (
-                                  <button
-                                    key={p.id}
-                                    onClick={() => handleAttachToProject(p)}
-                                    className="w-full flex items-center justify-between gap-2 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors text-left"
-                                  >
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <IconProjects size={26} className="text-claude-textSecondary flex-shrink-0 dark:[filter:brightness(0)_invert(1)_brightness(0.68)_sepia(0.18)]" />
-                                      <span className="truncate">{p.name}</span>
-                                    </div>
-                                    {isSelected && <Check size={14} className="text-claude-textSecondary flex-shrink-0" />}
-                                  </button>
-                                );
-                              }) : (
-                                <div className="px-4 py-2 text-[12px] text-claude-textSecondary italic">No projects yet</div>
-                              )}
-                              <div className="border-t border-claude-border mt-1 pt-1">
-                                <button
-                                  onClick={() => {
-                                    setShowProjectsSubmenu(false);
-                                    setShowPlusMenu(false);
-                                    setNewProjectName('');
-                                    setNewProjectDescription('');
-                                    setShowNewProjectDialog(true);
-                                  }}
-                                  className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-textSecondary hover:bg-claude-hover transition-colors"
-                                >
-                                  <Plus size={14} />
-                                  Start a new project
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                        {/* Skills submenu */}
-                        <div className="relative" onMouseLeave={() => setShowSkillsSubmenu(false)}>
-                          <button
-                            onMouseEnter={() => { setShowSkillsSubmenu(true); setShowProjectsSubmenu(false); }}
-                            onClick={(e) => { e.stopPropagation(); setShowSkillsSubmenu(prev => !prev); }}
-                            className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
-                          >
-                            <div className="flex items-center gap-3">
-                              <FileText size={16} className="text-claude-textSecondary" />
-                              Skills
-                            </div>
-                            <ChevronDown size={14} className="text-claude-textSecondary -rotate-90" />
-                          </button>
-                          {showSkillsSubmenu && enabledSkills.length > 0 && (
-                            <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[30vh] overflow-y-auto">
-                              {enabledSkills.map(skill => (
-                                <button
-                                  key={skill.id}
-                                  onClick={() => {
-                                    setShowPlusMenu(false);
-                                    setShowSkillsSubmenu(false);
-                                    const slug = skill.name.toLowerCase().replace(/\s+/g, '-');
-                                    setSelectedSkill({ name: skill.name, slug, description: skill.description });
-                                    setInputText(prev => prev ? `/${slug} ${prev}` : `/${slug} `);
-                                    inputRef.current?.focus();
-                                  }}
-                                  className="w-full text-left px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors truncate"
-                                >
-                                  {skill.name}
-                                </button>
-                              ))}
-                              <div className="border-t border-claude-border mt-1 pt-1">
-                                <button
-                                  onClick={() => {
-                                    setShowPlusMenu(false);
-                                    setShowSkillsSubmenu(false);
-                                    window.location.hash = '#/customize';
-                                  }}
-                                  className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-textSecondary hover:bg-claude-hover transition-colors"
-                                >
-                                  <FileText size={14} />
-                                  Manage skills
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                          {showSkillsSubmenu && enabledSkills.length === 0 && (
-                            <div className="absolute left-full bottom-0 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50">
-                              <div className="px-4 py-2 text-[12px] text-claude-textSecondary italic">No skills enabled</div>
-                              <div className="border-t border-claude-border mt-1 pt-1">
-                                <button
-                                  onClick={() => {
-                                    setShowPlusMenu(false);
-                                    window.location.hash = '#/customize';
-                                  }}
-                                  className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-textSecondary hover:bg-claude-hover transition-colors"
-                                >
-                                  <FileText size={14} />
-                                  Manage skills
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                        <button
-                          onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
-                          onClick={() => {
-                            setShowPlusMenu(false);
-                            if (!activeId || compactStatus.state === 'compacting') return;
-                            setCompactInstruction('');
-                            setShowCompactDialog(true);
-                          }}
-                          className="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
-                        >
-                          <ListCollapse size={16} className="text-claude-textSecondary" />
-                          Compact conversation
-                        </button>
-                        {/* Research toggle */}
-                        <div className="border-t border-claude-border mt-1 pt-1">
-                          <button
-                            onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
-                            onClick={() => { toggleResearchMode(); setShowPlusMenu(false); }}
-                            className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] hover:bg-claude-hover transition-colors"
-                          >
-                            <div className="flex items-center gap-3">
-                              <IconResearch size={16} className={researchMode ? 'text-[#2E7CF6]' : 'text-claude-textSecondary'} />
-                              <span className={researchMode ? 'text-[#2E7CF6] font-medium' : 'text-claude-text'}>Research</span>
-                            </div>
-                            {researchMode && <Check size={14} className="text-[#2E7CF6]" />}
-                          </button>
-                        </div>
-                        {/* Web search indicator — always on when provider supports it, not togglable */}
-                        <div>
-                          <button
-                            onMouseEnter={() => { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); }}
-                            onClick={() => {
-                              if (currentProviderSupportsWebSearch) {
-                                setShowPlusMenu(false);
-                              } else {
-                                setWebSearchToast('当前模型的供应商不支持网页搜索');
-                                setShowPlusMenu(false);
-                              }
-                            }}
-                            className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] hover:bg-claude-hover transition-colors"
-                          >
-                            <div className="flex items-center gap-3">
-                              <IconWebSearch size={16} className={currentProviderSupportsWebSearch ? 'text-[#2E7CF6]' : 'text-claude-textSecondary'} />
-                              <span className={currentProviderSupportsWebSearch ? 'text-[#2E7CF6] font-medium' : 'text-claude-text'}>Web search</span>
-                            </div>
-                            {currentProviderSupportsWebSearch && <Check size={14} className="text-[#2E7CF6]" />}
-                          </button>
-                        </div>
-                      </div>
-                    )}
+                    {showPlusMenu && renderSharedPlusMenu(conversationPlusMenuShellClass, conversationPlusMenuSubmenuClass)}
                     {/* Blue research badge next to + button when enabled */}
                     {researchMode && (
                       <div className="group/research relative ml-1 flex items-center bg-[#DBEAFE] dark:bg-[#1E3A5F] rounded-lg p-1.5">
@@ -4561,7 +4532,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={handleSend}
                         disabled={(!inputText.trim() && !pendingFiles.some(f => f.status === 'done')) || pendingFiles.some(f => f.status === 'uploading')}
-                        className="p-2 bg-[#C6613F] text-white rounded-lg hover:bg-[#D97757] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        className={conversationSendButtonClass}
                       >
                         <ArrowUp size={22} strokeWidth={2.5} />
                       </button>
