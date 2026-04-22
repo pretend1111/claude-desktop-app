@@ -10,6 +10,7 @@ const { TOOL_DEFINITIONS, executeTool } = require('./tools.cjs');
 const { runResearchPipeline } = require('./research-orchestrator.cjs');
 const { resolveRequestedModelForMode } = require('./chat-config.cjs');
 const { buildSelfHostedSystemPrompt } = require('./system-prompt-utils.cjs');
+const { mergeToolArgs, computeToolArgDelta } = require('./tool-arg-stream-utils.cjs');
 const {
     getInstallProfile,
     getGlobalConfigFilePath,
@@ -902,34 +903,6 @@ function initServer(mainWindow) {
                             }
                             return String(argsValue);
                         };
-                        const mergeToolArgs = (currentArgs, incomingArgs) => {
-                            if (!incomingArgs) return currentArgs || '';
-                            if (!currentArgs) return incomingArgs;
-                            // Some OpenAI-compatible providers stream cumulative argument snapshots
-                            // instead of append-only deltas. Detect and replace in that case.
-                            if (incomingArgs.length >= currentArgs.length && incomingArgs.startsWith(currentArgs)) {
-                                return incomingArgs;
-                            }
-                            if (currentArgs.length > incomingArgs.length && currentArgs.startsWith(incomingArgs)) {
-                                return currentArgs;
-                            }
-                            return currentArgs + incomingArgs;
-                        };
-                        const computeToolArgDelta = (previousArgs, nextArgs) => {
-                            const prev = previousArgs || '';
-                            const next = nextArgs || '';
-                            if (!next) return '';
-                            if (!prev) return next;
-                            if (next.startsWith(prev)) return next.slice(prev.length);
-                            if (prev.startsWith(next)) return '';
-
-                            let sharedPrefixLength = 0;
-                            const maxPrefix = Math.min(prev.length, next.length);
-                            while (sharedPrefixLength < maxPrefix && prev[sharedPrefixLength] === next[sharedPrefixLength]) {
-                                sharedPrefixLength += 1;
-                            }
-                            return next.slice(sharedPrefixLength);
-                        };
                         const ensureLiveToolBlock = (ptc) => {
                             if (!ptc || ptc.blockClosed || ptc.blockIndex != null || !ptc.name) return;
                             closeThinkingBlock();
@@ -942,13 +915,33 @@ function initServer(mainWindow) {
                                 content_block: { type: 'tool_use', id: ptc.id, name: ptc.name, input: {} }
                             });
                         };
+                        const emitToolSnapshotBlock = (ptc, input) => {
+                            if (!ptc) return;
+                            const blockIndex = nextContentBlockIndex++;
+                            const toolId = ptc.id || ('call_' + blockIndex);
+                            const toolName = ptc.name || '';
+                            writeProxyEvent('content_block_start', {
+                                type: 'content_block_start',
+                                index: blockIndex,
+                                content_block: { type: 'tool_use', id: toolId, name: toolName, input: input && Object.keys(input).length > 0 ? input : {} }
+                            });
+                            writeProxyEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex });
+                            ptc.id = toolId;
+                            ptc.blockIndex = blockIndex;
+                            ptc.blockClosed = true;
+                            ptc.sentArgs = ptc.args || '';
+                        };
                         const emitLiveToolArgDelta = (ptc) => {
                             if (!ptc) return;
                             ensureLiveToolBlock(ptc);
                             if (ptc.blockIndex == null || ptc.blockClosed) return;
                             const nextArgs = ptc.args || '';
                             const deltaText = computeToolArgDelta(ptc.sentArgs || '', nextArgs);
-                            if (!deltaText) return;
+                            if (deltaText === null) return;
+                            if (!deltaText) {
+                                ptc.sentArgs = nextArgs;
+                                return;
+                            }
                             writeProxyEvent('content_block_delta', {
                                 type: 'content_block_delta',
                                 index: ptc.blockIndex,
@@ -999,6 +992,9 @@ function initServer(mainWindow) {
                                 try { parsedInput = JSON.parse(ptc.args || '{}'); } catch (err) { parsedOk = false; parseErr = err; hasMalformed = !!ptc.args; }
                                 const recoveredInput = !parsedOk ? recoverMalformedToolInput(toolName, ptc.args) : null;
                                 ptc.recoveredInput = recoveredInput || null;
+                                ptc.finalInput = recoveredInput && Object.keys(recoveredInput).length > 0
+                                    ? recoveredInput
+                                    : (parsedInput && typeof parsedInput === 'object' && Object.keys(parsedInput).length > 0 ? parsedInput : {});
                                 if (ptc.args && Object.keys(parsedInput).length > 0) allEmpty = false;
                                 if (recoveredInput && Object.keys(recoveredInput).length > 0) allEmpty = false;
                                 if (!ptc.args && toolName) {
@@ -1053,34 +1049,25 @@ function initServer(mainWindow) {
                             for (const [key, ptc] of sortedToolCalls) {
                                 if (emptyKeys.includes(key)) continue;
                                 const recoveredInput = ptc.recoveredInput && typeof ptc.recoveredInput === 'object' ? ptc.recoveredInput : {};
-                                ensureLiveToolBlock(ptc);
+                                const finalInput = ptc.finalInput && typeof ptc.finalInput === 'object' ? ptc.finalInput : {};
 
                                 if (ptc.blockIndex == null) {
-                                    const blockIndex = nextContentBlockIndex++;
-                                    const toolId = ptc.id || ('call_' + blockIndex);
-                                    const toolName = ptc.name || '';
-                                    writeProxyEvent('content_block_start', {
-                                        type: 'content_block_start',
-                                        index: blockIndex,
-                                        content_block: { type: 'tool_use', id: toolId, name: toolName, input: recoveredInput }
-                                    });
-                                    if (ptc.args && Object.keys(recoveredInput).length === 0) {
-                                        writeProxyEvent('content_block_delta', {
-                                            type: 'content_block_delta',
-                                            index: blockIndex,
-                                            delta: { type: 'input_json_delta', partial_json: ptc.args }
-                                        });
-                                    }
-                                    writeProxyEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex });
-                                    ptc.blockIndex = blockIndex;
-                                    ptc.blockClosed = true;
-                                    ptc.sentArgs = ptc.args || '';
+                                    emitToolSnapshotBlock(ptc, finalInput);
                                     continue;
                                 }
 
-                                if (ptc.args && Object.keys(recoveredInput).length === 0) {
-                                    emitLiveToolArgDelta(ptc);
+                                if (
+                                    Object.keys(finalInput).length > 0 &&
+                                    (
+                                        ptc.sentArgs !== (ptc.args || '') ||
+                                        Object.keys(recoveredInput).length > 0
+                                    )
+                                ) {
+                                    closeToolBlock(ptc);
+                                    emitToolSnapshotBlock(ptc, finalInput);
+                                    continue;
                                 }
+
                                 closeToolBlock(ptc);
                             }
                             emittedToolCalls = true;
@@ -3852,15 +3839,24 @@ You have the following skills available. When a user's request matches a skill's
             } else if (se.type === 'content_block_start' && se.content_block && se.content_block.type === 'tool_use') {
                 var tu = se.content_block;
                 var capturedTextBefore = turn.pendingWorkText.trim();
-                turn.toolCalls.set(tu.id, { id: tu.id, name: tu.name, input: tu.input || {}, status: 'running', textBefore: capturedTextBefore });
-                turn.toolCallOrder.push(tu.id);
-                turn.pendingWorkText = '';
+                var existingTc = turn.toolCalls.get(tu.id);
+                if (existingTc) {
+                    existingTc.name = tu.name || existingTc.name;
+                    if (tu.input && Object.keys(tu.input).length > 0) existingTc.input = tu.input;
+                    if (!existingTc.textBefore && capturedTextBefore) existingTc.textBefore = capturedTextBefore;
+                } else {
+                    turn.toolCalls.set(tu.id, { id: tu.id, name: tu.name, input: tu.input || {}, status: 'running', textBefore: capturedTextBefore });
+                    turn.toolCallOrder.push(tu.id);
+                    turn.pendingWorkText = '';
+                }
                 // Emit tool placeholder NOW so the UI can render it in the right position
                 // relative to the streaming text. Input may be empty here; it will be
                 // updated via 'tool_use_input' once the input JSON has finished streaming.
                 if (!HIDDEN_TOOLS.has(tu.name) && !turn.sentToolStarts.has(tu.id)) {
                     turn.sentToolStarts.add(tu.id);
                     sendSSE({ type: 'tool_use_start', tool_use_id: tu.id, tool_name: tu.name, tool_input: tu.input || {}, textBefore: capturedTextBefore });
+                } else if (tu.input && Object.keys(tu.input).length > 0) {
+                    sendSSE({ type: 'tool_use_input', tool_use_id: tu.id, tool_input: tu.input });
                 }
             }
         }

@@ -34,14 +34,20 @@ test('bridge preserves extended thinking intent when spawning chat engines', () 
 
   assert.match(
     source,
-    /const computeToolArgDelta = \(previousArgs, nextArgs\) =>/,
-    'openai proxy should compute append-only tool argument deltas so self-hosted tool calls can be forwarded while they are still streaming'
+    /const \{ mergeToolArgs, computeToolArgDelta \} = require\('\.\/tool-arg-stream-utils\.cjs'\);/,
+    'openai proxy should use shared helpers to merge self-hosted tool argument snapshots without corrupting cumulative JSON updates'
   );
 
   assert.match(
     source,
     /const ensureLiveToolBlock = \(ptc\) =>/,
     'openai proxy should open tool_use content blocks before the upstream stream finishes so thought-chain rows can appear live'
+  );
+
+  assert.match(
+    source,
+    /else if \(tu\.input && Object\.keys\(tu\.input\)\.length > 0\)\s*\{\s*sendSSE\(\{ type: 'tool_use_input'/,
+    'replayed tool_use starts with finalized input should update the existing frontend row instead of enqueueing a duplicate start'
   );
 
   assert.match(
