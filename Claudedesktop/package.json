@@ -1,5 +1,6 @@
 {
   "name": "claude-desktop",
+  "homepage": "https://github.com/pretend1111/claude-desktop-app",
   "private": true,
   "version": "1.6.12",
   "description": "Claude Desktop - AI assistant with native capabilities",
