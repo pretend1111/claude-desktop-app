@@ -9,6 +9,7 @@ const { app } = require('electron');
 const { TOOL_DEFINITIONS, executeTool } = require('./tools.cjs');
 const { runResearchPipeline } = require('./research-orchestrator.cjs');
 const { resolveRequestedModelForMode } = require('./chat-config.cjs');
+const { buildSelfHostedSystemPrompt } = require('./system-prompt-utils.cjs');
 const {
     getInstallProfile,
     getGlobalConfigFilePath,
@@ -64,10 +65,9 @@ let customSystemPromptClean = ''; // Without anti-Kiro sections (for self-hosted
 try {
     if (fs.existsSync(CUSTOM_SYSTEM_PROMPT_PATH)) {
         customSystemPromptFull = fs.readFileSync(CUSTOM_SYSTEM_PROMPT_PATH, 'utf8');
-        // Strip <override_instructions> and <identity> blocks for self-hosted users
-        customSystemPromptClean = customSystemPromptFull
-            .replace(/<override_instructions>[\s\S]*?<\/override_instructions>\s*/g, '')
-            .replace(/<identity>[\s\S]*?<\/identity>\s*/g, '');
+        // Keep the Claude Desktop chat style for self-hosted users, but replace
+        // Claude-specific identity claims with a provider-neutral identity block.
+        customSystemPromptClean = buildSelfHostedSystemPrompt(customSystemPromptFull);
         console.log(`[System Prompt] Loaded (full=${customSystemPromptFull.length}, clean=${customSystemPromptClean.length} chars)`);
     } else {
         console.warn('[System Prompt] Custom prompt file not found at:', CUSTOM_SYSTEM_PROMPT_PATH);
@@ -758,12 +758,13 @@ function initServer(mainWindow) {
                         // Convert Anthropic thinking config 鈫?OpenAI-compatible thinking params
                         // Qwen uses enable_thinking, DeepSeek uses similar pattern
                         if (anthropicReq.thinking && anthropicReq.thinking.type === 'enabled') {
-                            // Qwen (and similar models) have a known issue where thinking + tool_calls
-                            // don't work reliably together 鈥?the model puts tool arguments into
-                            // reasoning_content instead of function.arguments, causing empty tool inputs.
-                            // Only enable thinking when there are no tools in the request.
-                            if (openaiTools.length > 0) {
-                                console.log('[Proxy] Tools present 鈥?disabling thinking to avoid empty tool args (thinking+tools incompatibility)');
+                            const incompatibleThinkingToolModel = /qwen|glm|deepseek|minimax/i.test(String(target.model || anthropicReq.model || ''));
+                            // Only disable thinking+tools for model families we've actually seen
+                            // misroute tool arguments into reasoning_content. Claude-compatible
+                            // OpenAI relays should still receive enable_thinking when the user
+                            // explicitly selected Extended thinking.
+                            if (openaiTools.length > 0 && incompatibleThinkingToolModel) {
+                                console.log('[Proxy] Tools present on known-incompatible reasoning model 鈥?disabling thinking to avoid empty tool args');
                             } else {
                                 openaiBody.enable_thinking = true;
                             }
@@ -863,8 +864,17 @@ function initServer(mainWindow) {
                             writeProxyEvent('content_block_stop', { type: 'content_block_stop', index: textBlockIndex });
                             textBlockIndex = null;
                         };
+                        const closeToolBlock = (ptc) => {
+                            if (!ptc || ptc.blockIndex == null || ptc.blockClosed) return;
+                            writeProxyEvent('content_block_stop', { type: 'content_block_stop', index: ptc.blockIndex });
+                            ptc.blockClosed = true;
+                        };
+                        const closeOpenToolBlocks = () => {
+                            for (const ptc of pendingToolCalls.values()) closeToolBlock(ptc);
+                        };
                         const ensureThinkingBlock = () => {
                             if (thinkingBlockIndex != null) return;
+                            closeOpenToolBlocks();
                             closeTextBlock();
                             thinkingBlockIndex = nextContentBlockIndex++;
                             writeProxyEvent('content_block_start', {
@@ -875,6 +885,7 @@ function initServer(mainWindow) {
                         };
                         const ensureTextBlock = () => {
                             if (textBlockIndex != null) return;
+                            closeOpenToolBlocks();
                             closeThinkingBlock();
                             textBlockIndex = nextContentBlockIndex++;
                             writeProxyEvent('content_block_start', {
@@ -904,12 +915,62 @@ function initServer(mainWindow) {
                             }
                             return currentArgs + incomingArgs;
                         };
+                        const computeToolArgDelta = (previousArgs, nextArgs) => {
+                            const prev = previousArgs || '';
+                            const next = nextArgs || '';
+                            if (!next) return '';
+                            if (!prev) return next;
+                            if (next.startsWith(prev)) return next.slice(prev.length);
+                            if (prev.startsWith(next)) return '';
+
+                            let sharedPrefixLength = 0;
+                            const maxPrefix = Math.min(prev.length, next.length);
+                            while (sharedPrefixLength < maxPrefix && prev[sharedPrefixLength] === next[sharedPrefixLength]) {
+                                sharedPrefixLength += 1;
+                            }
+                            return next.slice(sharedPrefixLength);
+                        };
+                        const ensureLiveToolBlock = (ptc) => {
+                            if (!ptc || ptc.blockClosed || ptc.blockIndex != null || !ptc.name) return;
+                            closeThinkingBlock();
+                            closeTextBlock();
+                            ptc.blockIndex = nextContentBlockIndex++;
+                            if (!ptc.id) ptc.id = 'call_' + ptc.blockIndex;
+                            writeProxyEvent('content_block_start', {
+                                type: 'content_block_start',
+                                index: ptc.blockIndex,
+                                content_block: { type: 'tool_use', id: ptc.id, name: ptc.name, input: {} }
+                            });
+                        };
+                        const emitLiveToolArgDelta = (ptc) => {
+                            if (!ptc) return;
+                            ensureLiveToolBlock(ptc);
+                            if (ptc.blockIndex == null || ptc.blockClosed) return;
+                            const nextArgs = ptc.args || '';
+                            const deltaText = computeToolArgDelta(ptc.sentArgs || '', nextArgs);
+                            if (!deltaText) return;
+                            writeProxyEvent('content_block_delta', {
+                                type: 'content_block_delta',
+                                index: ptc.blockIndex,
+                                delta: { type: 'input_json_delta', partial_json: deltaText }
+                            });
+                            ptc.sentArgs = nextArgs;
+                        };
                         const upsertPendingToolCall = (rawToolCall, fallbackKey) => {
                             if (!rawToolCall) return;
                             const rawIndex = rawToolCall.index;
                             const rawId = rawToolCall.id;
                             const key = rawIndex != null ? ('idx:' + rawIndex) : (rawId ? ('id:' + rawId) : fallbackKey);
-                            if (!pendingToolCalls.has(key)) pendingToolCalls.set(key, { id: '', name: '', args: '' });
+                            if (!pendingToolCalls.has(key)) {
+                                pendingToolCalls.set(key, {
+                                    id: '',
+                                    name: '',
+                                    args: '',
+                                    sentArgs: '',
+                                    blockIndex: null,
+                                    blockClosed: false,
+                                });
+                            }
                             const ptc = pendingToolCalls.get(key);
                             if (rawId && !ptc.id) ptc.id = rawId;
                             const fn = rawToolCall.function || rawToolCall.function_call || {};
@@ -922,6 +983,7 @@ function initServer(mainWindow) {
                                 ''
                             );
                             if (argsChunk) ptc.args = mergeToolArgs(ptc.args, argsChunk);
+                            emitLiveToolArgDelta(ptc);
                         };
                         const analyzePendingToolCalls = () => {
                             const sortedToolCalls = Array.from(pendingToolCalls.entries());
@@ -990,23 +1052,36 @@ function initServer(mainWindow) {
 
                             for (const [key, ptc] of sortedToolCalls) {
                                 if (emptyKeys.includes(key)) continue;
-                                const blockIndex = nextContentBlockIndex++;
-                                const toolId = ptc.id || ('call_' + blockIndex);
-                                const toolName = ptc.name || '';
                                 const recoveredInput = ptc.recoveredInput && typeof ptc.recoveredInput === 'object' ? ptc.recoveredInput : {};
-                                writeProxyEvent('content_block_start', {
-                                    type: 'content_block_start',
-                                    index: blockIndex,
-                                    content_block: { type: 'tool_use', id: toolId, name: toolName, input: recoveredInput }
-                                });
-                                if (ptc.args && Object.keys(recoveredInput).length === 0) {
-                                    writeProxyEvent('content_block_delta', {
-                                        type: 'content_block_delta',
+                                ensureLiveToolBlock(ptc);
+
+                                if (ptc.blockIndex == null) {
+                                    const blockIndex = nextContentBlockIndex++;
+                                    const toolId = ptc.id || ('call_' + blockIndex);
+                                    const toolName = ptc.name || '';
+                                    writeProxyEvent('content_block_start', {
+                                        type: 'content_block_start',
                                         index: blockIndex,
-                                        delta: { type: 'input_json_delta', partial_json: ptc.args }
+                                        content_block: { type: 'tool_use', id: toolId, name: toolName, input: recoveredInput }
                                     });
+                                    if (ptc.args && Object.keys(recoveredInput).length === 0) {
+                                        writeProxyEvent('content_block_delta', {
+                                            type: 'content_block_delta',
+                                            index: blockIndex,
+                                            delta: { type: 'input_json_delta', partial_json: ptc.args }
+                                        });
+                                    }
+                                    writeProxyEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex });
+                                    ptc.blockIndex = blockIndex;
+                                    ptc.blockClosed = true;
+                                    ptc.sentArgs = ptc.args || '';
+                                    continue;
                                 }
-                                writeProxyEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex });
+
+                                if (ptc.args && Object.keys(recoveredInput).length === 0) {
+                                    emitLiveToolArgDelta(ptc);
+                                }
+                                closeToolBlock(ptc);
                             }
                             emittedToolCalls = true;
                         };
@@ -3629,7 +3704,7 @@ You have the following skills available. When a user's request matches a skill's
     // ============ PERSISTENT ENGINE POOL ============
     const MAX_ENGINE_POOL_SIZE = 3;
     const enginePool = new Map();
-    const HIDDEN_TOOLS = new Set(['EnterWorktree', 'ExitWorktree', 'TodoWrite', 'WebSearch', 'WebFetch']);
+    const HIDDEN_TOOLS = new Set(['EnterWorktree', 'ExitWorktree', 'TodoWrite']);
 
     function summarizeEngine(eng) {
         if (!eng) return 'null';
@@ -3718,6 +3793,7 @@ You have the following skills available. When a user's request matches a skill's
     }
     function resolveChatConfig(conv, user_mode, env_token, env_base_url) {
         const rawModel = conv.model || 'claude-sonnet-4-6';
+        const thinkingEnabled = /-thinking$/.test(rawModel);
         const requestedModelId = rawModel.replace(/-thinking$/, '');
         const effectiveUserMode = user_mode === 'selfhosted' ? 'selfhosted' : 'clawparrot';
         const initialProvider = effectiveUserMode === 'selfhosted' ? resolveProvider(requestedModelId) : null;
@@ -3745,7 +3821,7 @@ You have the following skills available. When a user's request matches a skill's
             console.log('[Chat] Provider:', provider.name, '| format:', apiFormat, '| model:', modelId, '| webSearch:', supportsWebSearch, '| strategy:', webSearchStrategy);
         }
         else { const validToken = (env_token && env_token !== 'self-hosted') ? env_token : ''; apiKey = validToken || engineEnvVars.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY; baseUrl = validToken ? (env_base_url || engineEnvVars.ANTHROPIC_BASE_URL || process.env.ANTHROPIC_BASE_URL) : (engineEnvVars.ANTHROPIC_BASE_URL || env_base_url || process.env.ANTHROPIC_BASE_URL); supportsWebSearch = true; }
-        return { modelId, provider, apiKey, baseUrl, apiFormat, supportsWebSearch, webSearchStrategy };
+        return { modelId, thinkingEnabled, provider, apiKey, baseUrl, apiFormat, supportsWebSearch, webSearchStrategy };
     }
 
     function handleTurnEvent(engine, convId, conv, evt) {
@@ -3799,9 +3875,21 @@ You have the following skills available. When a user's request matches a skill's
                 var tc = turn.toolCalls.get(block.id);
                 if (tc) { tc.input = block.input; } else { tc = { id: block.id, name: block.name, input: block.input, status: 'running', textBefore: turn.pendingWorkText.trim() }; turn.toolCalls.set(block.id, tc); turn.toolCallOrder.push(block.id); turn.pendingWorkText = ''; }
                 if (block.name === 'WebSearch') {
-                    if (!turn.sentToolStarts.has(block.id)) { turn.sentToolStarts.add(block.id); sendSSE({ type: 'status', message: 'Searching: ' + ((block.input && block.input.query) || 'the web') }); }
+                    if (!turn.sentToolStarts.has(block.id)) {
+                        turn.sentToolStarts.add(block.id);
+                        sendSSE({ type: 'tool_use_start', tool_use_id: block.id, tool_name: block.name, tool_input: block.input, textBefore: (tc && tc.textBefore) || '' });
+                    } else {
+                        sendSSE({ type: 'tool_use_input', tool_use_id: block.id, tool_input: block.input });
+                    }
+                    sendSSE({ type: 'status', message: 'Searching: ' + ((block.input && block.input.query) || 'the web') });
                 } else if (block.name === 'WebFetch') {
-                    if (!turn.sentToolStarts.has(block.id)) { turn.sentToolStarts.add(block.id); sendSSE({ type: 'status', message: 'Fetching: ' + ((block.input && block.input.url) || '') }); }
+                    if (!turn.sentToolStarts.has(block.id)) {
+                        turn.sentToolStarts.add(block.id);
+                        sendSSE({ type: 'tool_use_start', tool_use_id: block.id, tool_name: block.name, tool_input: block.input, textBefore: (tc && tc.textBefore) || '' });
+                    } else {
+                        sendSSE({ type: 'tool_use_input', tool_use_id: block.id, tool_input: block.input });
+                    }
+                    sendSSE({ type: 'status', message: 'Fetching: ' + ((block.input && block.input.url) || '') });
                 } else if (!HIDDEN_TOOLS.has(block.name)) {
                     if (!turn.sentToolStarts.has(block.id)) {
                         // stream_event content_block_start did not fire (some providers); send placeholder + full input together
@@ -3869,7 +3957,7 @@ You have the following skills available. When a user's request matches a skill's
         if (turn.maxTimeoutId) clearTimeout(turn.maxTimeoutId);
         engine.turn = null; engine.state = 'idle';
         if (turn.assistantText || turn.thinkingText || turn.toolCalls.size > 0) {
-            db.messages.push({ id: turn.assistantUuid || uuidv4(), conversation_id: convId, role: 'assistant', content: JSON.stringify([{ type: 'text', text: turn.assistantText }]), created_at: new Date().toISOString(), engineUuidSynced: !!turn.assistantUuid, thinking: turn.thinkingText || undefined, toolCalls: turn.toolCalls.size > 0 ? turn.toolCallOrder.map(id => turn.toolCalls.get(id)).filter(Boolean) : undefined, toolTextEndOffset: (turn.toolCalls.size > 0 && turn.lastToolDoneTextLen > 0) ? turn.lastToolDoneTextLen : undefined, searchLogs: turn.searchLogs.length > 0 ? turn.searchLogs : undefined });
+            db.messages.push({ id: turn.assistantUuid || uuidv4(), conversation_id: convId, role: 'assistant', content: JSON.stringify([{ type: 'text', text: turn.assistantText }]), created_at: new Date().toISOString(), model: conv.model, engineUuidSynced: !!turn.assistantUuid, thinking: turn.thinkingText || undefined, toolCalls: turn.toolCalls.size > 0 ? turn.toolCallOrder.map(id => turn.toolCalls.get(id)).filter(Boolean) : undefined, toolTextEndOffset: (turn.toolCalls.size > 0 && turn.lastToolDoneTextLen > 0) ? turn.lastToolDoneTextLen : undefined, searchLogs: turn.searchLogs.length > 0 ? turn.searchLogs : undefined });
             saveDb();
             generateTitleAsync(convId, turn.message.slice(0, 300), turn.assistantText.slice(0, 300), turn.apiKey, turn.baseUrl, conv.model, turn.apiFormat);
         }
@@ -3930,10 +4018,11 @@ You have the following skills available. When a user's request matches a skill's
     }
 
     function spawnPersistentEngine(convId, conv, config) {
-        const { modelId, apiKey, baseUrl, apiFormat, sysPrompt } = config;
+        const { modelId, thinkingEnabled = false, apiKey, baseUrl, apiFormat, sysPrompt } = config;
         evictOldestEngine();
         const claudeDir = path.join(os.homedir(), '.claude');
         const cliArgs = ['--preload', enginePreload, '--env-file=' + engineEnv, engineCli, '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-mode', 'bypassPermissions', '--permission-prompt-tool', 'stdio', '--add-dir', claudeDir, '--model', modelId];
+        cliArgs.push('--thinking', config.thinkingEnabled ? 'enabled' : 'disabled');
         if (conv.claude_session_id) {
             cliArgs.push('--resume', conv.claude_session_id);
             // If a delete/edit/regenerate queued a rewind point, slice the resumed
@@ -3965,14 +4054,14 @@ You have the following skills available. When a user's request matches a skill's
             proxyTarget = { apiKey, baseUrl, model: modelId, format: 'openai', conversationId: convId, supportsWebSearch: config.supportsWebSearch === true, webSearchStrategy: config.webSearchStrategy || null };
             envVars.ANTHROPIC_API_KEY = 'proxy-key'; envVars.ANTHROPIC_BASE_URL = 'http://127.0.0.1:' + proxyPort + '/v1';
             try { const warmUrl = new URL(normalizeBaseUrl(baseUrl)); require('dns').resolve4(warmUrl.hostname, () => {}); fetch(warmUrl.origin, { method: 'HEAD', signal: AbortSignal.timeout(5000) }).catch(() => {}); } catch (_) {}
-            console.log('[EnginePool] OpenAI proxy, model=' + modelId);
+            console.log('[EnginePool] OpenAI proxy, model=' + modelId, '| thinking=' + thinkingEnabled);
         } else { if (apiKey) envVars.ANTHROPIC_API_KEY = apiKey; envVars.ANTHROPIC_BASE_URL = normalizeBaseUrl(baseUrl || engineEnvVars.ANTHROPIC_BASE_URL || 'https://api.anthropic.com'); }
-        console.log('[EnginePool] Spawning persistent engine, conv=' + convId + ' model=' + modelId + ' session=' + (conv.claude_session_id || 'new'));
+        console.log('[EnginePool] Spawning persistent engine, conv=' + convId + ' model=' + modelId + ' thinking=' + thinkingEnabled + ' session=' + (conv.claude_session_id || 'new'));
         const { spawn } = require('child_process');
         const child = spawn(bunExePath, cliArgs, { cwd: conv.workspace_path, env: envVars, stdio: ['pipe', 'pipe', 'pipe'] });
         let resolveReady;
         const readyPromise = new Promise((resolve) => { resolveReady = resolve; });
-        const engine = { child, convId, modelId, apiKey, baseUrl, apiFormat, lastUsed: Date.now(), sessionId: conv.claude_session_id, state: 'idle', buf: '', turn: null, needsRestart: false, ready: false, readyPromise, resolveReady };
+        const engine = { child, convId, modelId, thinkingEnabled, apiKey, baseUrl, apiFormat, lastUsed: Date.now(), sessionId: conv.claude_session_id, state: 'idle', buf: '', turn: null, needsRestart: false, ready: false, readyPromise, resolveReady };
         activeChildren.set(convId, child);
 
         const handleEngineStdoutLine = (line) => {
@@ -4074,7 +4163,7 @@ You have the following skills available. When a user's request matches a skill's
             return res.status(400).json({ error: err.message || 'Invalid chat config' });
         }
         const sysPrompt = buildChatSystemPrompt(conv, user_mode, user_profile);
-        console.log('[EnginePool] Pre-warming engine for', convId, 'model=' + config.modelId);
+        console.log('[EnginePool] Pre-warming engine for', convId, 'model=' + config.modelId, 'thinking=' + config.thinkingEnabled);
         spawnPersistentEngine(convId, conv, { ...config, sysPrompt });
         res.json({ ok: true });
     });
@@ -4214,6 +4303,7 @@ You have the following skills available. When a user's request matches a skill's
                 id: userMsgUuid, conversation_id, role: 'user',
                 content: JSON.stringify([{ type: 'text', text: message }]),
                 created_at: new Date().toISOString(),
+                model: conv.model,
                 engineUuidSynced: true,
                 attachments: attachments && attachments.length > 0 ? attachments.map(a => ({ fileId: a.fileId, fileName: a.fileName, fileType: a.fileType, mimeType: a.mimeType, size: a.size, source: a.source, gh_repo: a.ghRepo, gh_ref: a.ghRef })) : undefined
             });
@@ -4245,6 +4335,7 @@ You have the following skills available. When a user's request matches a skill's
                         role: 'assistant',
                         content: JSON.stringify([{ type: 'text', text: result.report }]),
                         created_at: new Date().toISOString(),
+                        model: conv.model,
                         research: {
                             plan: result.plan,
                             sub_results: result.sub_results.map(r => ({
@@ -4284,11 +4375,15 @@ You have the following skills available. When a user's request matches a skill's
             const apiKeyChanged = !!engine && engine.apiKey !== config.apiKey;
             const baseUrlChanged = !!engine && engine.baseUrl !== config.baseUrl;
             const apiFormatChanged = !!engine && engine.apiFormat !== config.apiFormat;
-            if (engine && (!isEngineAlive(engine) || engine.modelId !== config.modelId || engine.needsRestart || apiKeyChanged || baseUrlChanged || apiFormatChanged)) {
+            const thinkingChanged = !!engine && !!engine.thinkingEnabled !== !!config.thinkingEnabled;
+            if (engine && (!isEngineAlive(engine) || engine.modelId !== config.modelId || thinkingChanged || engine.needsRestart || apiKeyChanged || baseUrlChanged || apiFormatChanged)) {
                 killEngine(conversation_id, 'chat_existing_engine_invalid_or_stale', {
                     isAlive: !!isEngineAlive(engine),
                     currentModel: engine && engine.modelId,
                     requestedModel: config.modelId,
+                    currentThinkingEnabled: !!(engine && engine.thinkingEnabled),
+                    requestedThinkingEnabled: !!config.thinkingEnabled,
+                    thinkingChanged,
                     needsRestart: !!(engine && engine.needsRestart),
                     apiKeyChanged,
                     baseUrlChanged,
