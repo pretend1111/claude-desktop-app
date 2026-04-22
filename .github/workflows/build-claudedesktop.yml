@@ -1,0 +1,93 @@
+name: Build Claude Desktop Packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+  release:
+    types:
+      - published
+
+concurrency:
+  group: build-claudedesktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Intel
+            os: macos-15-intel
+            build_args: --mac --x64
+            artifact_name: claude-desktop-macos-x64
+          - name: macOS Apple Silicon
+            os: macos-14
+            build_args: --mac --arm64
+            artifact_name: claude-desktop-macos-arm64
+          - name: Windows x64
+            os: windows-2022
+            build_args: --win --x64
+            artifact_name: claude-desktop-windows-x64
+          - name: Windows ARM64
+            os: windows-11-arm
+            build_args: --win --arm64
+            artifact_name: claude-desktop-windows-arm64
+          - name: Linux x64
+            os: ubuntu-24.04
+            build_args: --linux --x64
+            artifact_name: claude-desktop-linux-x64
+
+    defaults:
+      run:
+        working-directory: Claudedesktop
+
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            Claudedesktop/package-lock.json
+            Claudedesktop/engine/package-lock.json
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build renderer
+        run: npm run build
+
+      - name: Package desktop app
+        shell: bash
+        run: npx electron-builder --publish never ${{ matrix.build_args }}
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          if-no-files-found: error
+          path: |
+            Claudedesktop/release/**/*.dmg
+            Claudedesktop/release/**/*.zip
+            Claudedesktop/release/**/*.exe
+            Claudedesktop/release/**/*.AppImage
+            Claudedesktop/release/**/*.deb
+            Claudedesktop/release/**/*.blockmap
+            Claudedesktop/release/**/*.yml
+            Claudedesktop/release/**/*.yaml
