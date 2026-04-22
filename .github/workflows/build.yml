@@ -11,16 +11,29 @@ jobs:
         include:
           - os: windows-latest
             platform: win
-            bun_target: bun-windows-x64
+            arch: x64
             bun_ext: .exe
+            build_cmd: npx electron-builder --win nsis --x64 --publish always
+          - os: windows-11-arm
+            platform: win
+            arch: arm64
+            bun_ext: .exe
+            build_cmd: npx electron-builder --win nsis --arm64 --publish always
           - os: macos-latest
             platform: mac
-            bun_target: bun-darwin-arm64
+            arch: arm64
             bun_ext: ""
+            build_cmd: npx electron-builder --mac dmg zip --arm64 --publish always
+          - os: macos-15-intel
+            platform: mac
+            arch: x64
+            bun_ext: ""
+            build_cmd: npx electron-builder --mac dmg zip --x64 --publish always
           - os: ubuntu-latest
             platform: linux
-            bun_target: bun-linux-x64
+            arch: x64
             bun_ext: ""
+            build_cmd: npx electron-builder --linux AppImage deb --x64 --publish always
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -64,19 +77,8 @@ jobs:
           "
       - name: Build frontend
         run: npx vite build
-      - name: Build & Publish (Windows)
-        if: matrix.platform == 'win'
-        run: npx electron-builder --win --publish always
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build & Publish (Mac)
-        if: matrix.platform == 'mac'
-        run: npx electron-builder --mac --publish always
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build & Publish (Linux)
-        if: matrix.platform == 'linux'
-        run: npx electron-builder --linux AppImage deb --publish always
+      - name: Build & Publish (${{ matrix.platform }}-${{ matrix.arch }})
+        run: ${{ matrix.build_cmd }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
