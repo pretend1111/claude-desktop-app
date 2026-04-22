@@ -230,6 +230,8 @@ const ProviderSettings: React.FC = () => {
   const [showAdd, setShowAdd] = useState(false);
   const [newUrl, setNewUrl] = useState('');
   const [newKey, setNewKey] = useState('');
+  const [addError, setAddError] = useState<string | null>(null);
+  const [providerActionError, setProviderActionError] = useState<string | null>(null);
 
   useEffect(() => { loadProviders(); }, []);
 
@@ -260,49 +262,59 @@ const ProviderSettings: React.FC = () => {
     if (!newUrl.trim() && !newKey.trim()) return;
     const url = newUrl.trim();
     const key = newKey.trim();
+    if (!url) {
+      setAddError('请输入 API 地址');
+      return;
+    }
     const detected = detectProvider(url);
     const format = detected?.format || 'openai';
 
-    // Every provider starts with supportsWebSearch=false. It flips to true only after the
-    // probe endpoint returns success.
-    const p = await createProvider({
-      name: detected?.name || extractDomainName(url),
-      baseUrl: url,
-      format,
-      apiKey: key,
-      models: (detected?.defaultModels || []).map(m => ({ ...m, enabled: true })),
-      enabled: true,
-      supportsWebSearch: false,
-    });
-    setProviderList(prev => [...prev, p]);
-    setSelectedId(p.id);
-    setShowAdd(false);
-    setNewUrl('');
-    setNewKey('');
+    try {
+      setAddError(null);
 
-    // Auto-probe: fetch models from /v1/models endpoint for all providers
-    if (key) {
-      try {
-        let endpoint = url.replace(/\/+$/, '').replace(/\/(chat\/completions|messages)$/, '').replace(/\/+$/, '');
-        if (!endpoint.endsWith('/v1')) endpoint += '/v1';
-        const res = await fetch(endpoint + '/models', { headers: { 'Authorization': 'Bearer ' + key } });
-        if (res.ok) {
-          const data = await res.json();
-          const models = (data.data || [])
-            .filter((m: any) => m.id && typeof m.id === 'string')
-            .map((m: any) => ({ id: m.id, name: m.id, enabled: true }));
-          if (models.length > 0) {
-            await updateProvider(p.id, { models });
-            setProviderList(prev => prev.map(x => x.id === p.id ? { ...x, models } : x));
+      // Every provider starts with supportsWebSearch=false. It flips to true only after the
+      // probe endpoint returns success.
+      const p = await createProvider({
+        name: detected?.name || extractDomainName(url),
+        baseUrl: url,
+        format,
+        apiKey: key,
+        models: (detected?.defaultModels || []).map(m => ({ ...m, enabled: true })),
+        enabled: true,
+        supportsWebSearch: false,
+      });
+      setProviderList(prev => [...prev, p]);
+      setSelectedId(p.id);
+      setShowAdd(false);
+      setNewUrl('');
+      setNewKey('');
+
+      // Auto-probe: fetch models from /v1/models endpoint for all providers
+      if (key) {
+        try {
+          let endpoint = url.replace(/\/+$/, '').replace(/\/(chat\/completions|messages)$/, '').replace(/\/+$/, '');
+          if (!endpoint.endsWith('/v1')) endpoint += '/v1';
+          const res = await fetch(endpoint + '/models', { headers: { 'Authorization': 'Bearer ' + key } });
+          if (res.ok) {
+            const data = await res.json();
+            const models = (data.data || [])
+              .filter((m: any) => m.id && typeof m.id === 'string')
+              .map((m: any) => ({ id: m.id, name: m.id, enabled: true }));
+            if (models.length > 0) {
+              await updateProvider(p.id, { models });
+              setProviderList(prev => prev.map(x => x.id === p.id ? { ...x, models } : x));
+            }
           }
-        }
-        // Also try Anthropic format if OpenAI fails
-      } catch (_) { }
-    }
+          // Also try Anthropic format if OpenAI fails
+        } catch (_) { }
+      }
 
-    // Kick off the web-search capability test automatically after import.
-    // Wait a tick so the user sees the provider card before the spinner appears.
-    setTimeout(() => { handleTestWebSearch(p.id); }, 300);
+      // Kick off the web-search capability test automatically after import.
+      // Wait a tick so the user sees the provider card before the spinner appears.
+      setTimeout(() => { handleTestWebSearch(p.id); }, 300);
+    } catch (error) {
+      setAddError(error instanceof Error ? error.message : '添加供应商失败');
+    }
   };
 
   // Extract a readable name from domain
@@ -318,14 +330,24 @@ const ProviderSettings: React.FC = () => {
   }
 
   const handleUpdate = async (id: string, updates: Partial<Provider>) => {
-    const updated = await updateProvider(id, updates);
-    setProviderList(prev => prev.map(p => p.id === id ? { ...p, ...updated } : p));
+    try {
+      setProviderActionError(null);
+      const updated = await updateProvider(id, updates);
+      setProviderList(prev => prev.map(p => p.id === id ? { ...p, ...updated } : p));
+    } catch (error) {
+      setProviderActionError(error instanceof Error ? error.message : '更新供应商失败');
+    }
   };
 
   const handleDelete = async (id: string) => {
-    await deleteProvider(id);
-    setProviderList(prev => prev.filter(p => p.id !== id));
-    if (selectedId === id) setSelectedId(providerList.find(p => p.id !== id)?.id || null);
+    try {
+      setProviderActionError(null);
+      await deleteProvider(id);
+      setProviderList(prev => prev.filter(p => p.id !== id));
+      if (selectedId === id) setSelectedId(providerList.find(p => p.id !== id)?.id || null);
+    } catch (error) {
+      setProviderActionError(error instanceof Error ? error.message : '删除供应商失败');
+    }
   };
 
   // Auto-fetch models from /v1/models endpoint
@@ -567,7 +589,7 @@ const ProviderSettings: React.FC = () => {
               return (
                 <button
                   key={p.id}
-                  onClick={() => { setSelectedId(p.id); setModelPage(0); }}
+                  onClick={() => { setSelectedId(p.id); setModelPage(0); setProviderActionError(null); }}
                   className={`w-full flex items-center gap-3 px-3 py-3 rounded-[12px] transition-colors text-left border ${isActive ? 'bg-claude-input border-claude-border shadow-sm' : 'border-transparent hover:bg-claude-hover/80'
                     }`}
                 >
@@ -633,11 +655,14 @@ const ProviderSettings: React.FC = () => {
                     <div className="text-[12px] text-claude-textSecondary/60">未识别的供应商，添加后将自动探测格式和可用模型</div>
                   );
                 })()}
+                {addError && (
+                  <div className="text-[12px] text-red-400/90">{addError}</div>
+                )}
                 <div className="flex gap-2 pt-2">
                   <button onClick={handleQuickAdd} className="px-4 py-2 text-[14px] font-medium text-claude-bg bg-claude-text rounded-lg transition-colors hover:opacity-90">
                     添加
                   </button>
-                  <button onClick={() => { setShowAdd(false); setNewUrl(''); setNewKey(''); }} className="px-4 py-2 text-[14px] font-medium text-claude-text border border-claude-border hover:bg-claude-hover rounded-lg transition-colors">
+                  <button onClick={() => { setShowAdd(false); setNewUrl(''); setNewKey(''); setAddError(null); }} className="px-4 py-2 text-[14px] font-medium text-claude-text border border-claude-border hover:bg-claude-hover rounded-lg transition-colors">
                     取消
                   </button>
                 </div>
@@ -675,6 +700,10 @@ const ProviderSettings: React.FC = () => {
                     <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${selected.enabled ? 'left-5' : 'left-1'}`} />
                   </button>
                 </div>
+
+                {providerActionError && (
+                  <div className="text-[12px] text-red-400/90 -mt-2">{providerActionError}</div>
+                )}
 
                 {/* API Key */}
                 <div>
