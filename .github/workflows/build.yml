@@ -1,57 +1,54 @@
-name: Build & Release
+name: Upload Windows Release Assets
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to upload assets to
+        required: true
+        default: v1.16.14
+      source_ref:
+        description: Git ref to build from
+        required: true
+        default: v1.16.14
+
 jobs:
-  build:
+  build-windows:
     strategy:
       matrix:
         include:
           - os: windows-latest
-            platform: win
             arch: x64
             bun_ext: .exe
-            build_cmd: npx electron-builder --win nsis --x64 --publish always
           - os: windows-11-arm
-            platform: win
             arch: arm64
             bun_ext: .exe
-            build_cmd: npx electron-builder --win nsis --arm64 --publish always
-          - os: macos-latest
-            platform: mac
-            arch: arm64
-            bun_ext: ""
-            build_cmd: npx electron-builder --mac dmg zip --arm64 --publish always
-          - os: macos-15-intel
-            platform: mac
-            arch: x64
-            bun_ext: ""
-            build_cmd: npx electron-builder --mac dmg zip --x64 --publish always
-          - os: ubuntu-latest
-            platform: linux
-            arch: x64
-            bun_ext: ""
-            build_cmd: npx electron-builder --linux AppImage deb --x64 --publish always
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Checkout
+      - name: Checkout source ref
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
       - name: Install app dependencies
         run: npm ci
+
       - name: Install engine dependencies
         run: cd engine && bun install
+
       - name: Copy Bun binary to engine/bin
         shell: bash
         run: |
@@ -60,14 +57,12 @@ jobs:
           cp "$BUN_PATH" "engine/bin/bun${{ matrix.bun_ext }}"
           chmod +x "engine/bin/bun${{ matrix.bun_ext }}" 2>/dev/null || true
           ls -lh engine/bin/
+
       - name: Write build-time secrets
         shell: bash
         env:
           GH_OAUTH_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
         run: |
-          # Inject GitHub OAuth client secret into electron/secrets.json, read by main.cjs
-          # at launch. If the GitHub Actions secret is missing the file is written empty —
-          # app still runs, only the "import from GitHub" feature shows an explicit error.
           node -e "
             const fs = require('fs');
             const secrets = {};
@@ -75,59 +70,48 @@ jobs:
             fs.writeFileSync('electron/secrets.json', JSON.stringify(secrets, null, 2));
             console.log('secrets.json written, keys:', Object.keys(secrets));
           "
+
       - name: Build frontend
         run: npx vite build
-      - name: Build & Publish (${{ matrix.platform }}-${{ matrix.arch }})
-        run: ${{ matrix.build_cmd }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # After all builds complete, sync release files to Chengdu server for auto-update
-  sync-updates:
-    needs: build
+      - name: Build Windows installer
+        run: npx electron-builder --win nsis --${{ matrix.arch }} --publish never
+
+      - name: Upload architecture-specific assets
+        shell: bash
+        run: |
+          VERSION="${{ inputs.release_tag }}"
+          VERSION="${VERSION#v}"
+          EXE_PATH=$(find release -maxdepth 1 -type f -name '*.exe' ! -name '*.exe.blockmap' | head -n 1)
+          BLOCKMAP_PATH=$(find release -maxdepth 1 -type f -name '*.exe.blockmap' | head -n 1 || true)
+
+          if [ -z "$EXE_PATH" ]; then
+            echo "No Windows installer found in release/"
+            exit 1
+          fi
+
+          DEST_EXE="Claude-Desktop-Setup-${VERSION}-${{ matrix.arch }}.exe"
+          cp "$EXE_PATH" "release/$DEST_EXE"
+          gh release upload "${{ inputs.release_tag }}" "release/$DEST_EXE" --clobber
+
+          if [ -n "$BLOCKMAP_PATH" ] && [ -f "$BLOCKMAP_PATH" ]; then
+            DEST_BLOCKMAP="${DEST_EXE}.blockmap"
+            cp "$BLOCKMAP_PATH" "release/$DEST_BLOCKMAP"
+            gh release upload "${{ inputs.release_tag }}" "release/$DEST_BLOCKMAP" --clobber
+          fi
+
+  cleanup-generic-assets:
+    needs: build-windows
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Get version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-      - name: Download release assets and sync to Chengdu
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          CHENGDU_HOST: 47.108.25.68
-          CHENGDU_PASS: ${{ secrets.CHENGDU_SSH_PASS }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
+      - name: Delete ambiguous generic Windows assets
+        shell: bash
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
-
-          # Download all release assets (gh CLI works with draft releases)
-          mkdir -p updates
-          gh release download "${GITHUB_REF_NAME}" -D updates/
-          echo "Downloaded assets:"
-          ls -lh updates/
-
-          # Publish draft release so clients can see it
-          gh release edit "${GITHUB_REF_NAME}" --draft=false
-          echo "Release published."
-
-          # Upload to Chengdu server
-          echo "Uploading to Chengdu server..."
-          sshpass -p "$CHENGDU_PASS" scp -o StrictHostKeyChecking=no updates/* root@${CHENGDU_HOST}:/www/wwwroot/claude-app/updates/
-
-          # Clean old version files (keep only current version + yml files)
-          echo "Cleaning old files..."
-          sshpass -p "$CHENGDU_PASS" ssh -o StrictHostKeyChecking=no root@${CHENGDU_HOST} "
-            cd /www/wwwroot/claude-app/updates/
-            for f in *.exe *.exe.blockmap *.zip *.zip.blockmap *.dmg *.dmg.blockmap *.AppImage *.deb; do
-              if [ -f \"\$f\" ] && ! echo \"\$f\" | grep -q '${VERSION}'; then
-                echo \"Removing old: \$f\"
-                rm -f \"\$f\"
-              fi
-            done
-            chown -R www:www /www/wwwroot/claude-app/updates/
-            echo 'Files on server:'
-            ls -lh /www/wwwroot/claude-app/updates/
-          "
-          echo "Done!"
+          VERSION="${{ inputs.release_tag }}"
+          VERSION="${VERSION#v}"
+          gh release delete-asset "${{ inputs.release_tag }}" "Claude-Desktop-Setup-${VERSION}.exe" --yes || true
+          gh release delete-asset "${{ inputs.release_tag }}" "Claude-Desktop-Setup-${VERSION}.exe.blockmap" --yes || true
