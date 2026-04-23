@@ -13,6 +13,7 @@ const KNOWN_PROVIDERS: Array<{
   letter: string;
   defaultModels?: ProviderModel[];
   webSearch?: 'native';
+  isLocal?: boolean;
 }> = [
     {
       match: u => /anthropic\.com/i.test(u), name: 'Anthropic', format: 'anthropic', color: '#D97757', letter: 'A',
@@ -49,6 +50,11 @@ const KNOWN_PROVIDERS: Array<{
       match: u => /api-cn\.jiazhuang/i.test(u), name: 'Clawparrot', format: 'anthropic', color: '#C6613F', letter: 'C',
       webSearch: 'native',
       defaultModels: [{ id: 'claude-opus-4-6', name: 'Claude Opus 4.6' }, { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' }, { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5' }]
+    },
+    {
+      match: u => /lmstudio/i.test(u) || /127\.0\.0\.1/i.test(u) || /192\.168\./i.test(u) || /localhost/i.test(u),
+      name: 'LM Studio', format: 'anthropic', color: '#6C5CE7', letter: 'L', isLocal: true,
+      defaultModels: []
     },
   ];
 
@@ -393,7 +399,7 @@ const ProviderSettings: React.FC = () => {
     if (uid) {
       const src = allAvailableModels.find(m => modelUid(m) === uid);
       if (src) {
-        const thinkingId = detectThinkingId(modelId);
+        const thinkingId = detectThinkingId(src.id);
         updated = [...updated, { ...src, tier, thinkingId }];
       }
     }
@@ -633,6 +639,33 @@ const ProviderSettings: React.FC = () => {
                     <div className="text-[12px] text-claude-textSecondary/60">未识别的供应商，添加后将自动探测格式和可用模型</div>
                   );
                 })()}
+                {/* Quick add local model shortcut */}
+                <div className="pt-1">
+                  <div className="text-[11px] text-claude-textSecondary/50 mb-2">或者快速添加：</div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => { setNewUrl('http://127.0.0.1:1234'); setNewKey(''); }}
+                      className="px-3 py-1.5 text-[12px] rounded-lg border border-claude-border/60 text-claude-textSecondary hover:text-claude-text hover:border-claude-textSecondary/50 hover:bg-claude-hover transition-colors flex items-center gap-1.5"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                      LM Studio (本地)
+                    </button>
+                    <button
+                      onClick={() => { setNewUrl('http://localhost:8080'); setNewKey(''); }}
+                      className="px-3 py-1.5 text-[12px] rounded-lg border border-claude-border/60 text-claude-textSecondary hover:text-claude-text hover:border-claude-textSecondary/50 hover:bg-claude-hover transition-colors flex items-center gap-1.5"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                      Ollama (本地)
+                    </button>
+                    <button
+                      onClick={() => { setNewUrl(''); setNewKey(''); }}
+                      className="px-3 py-1.5 text-[12px] rounded-lg border border-claude-border/60 text-claude-textSecondary hover:text-claude-text hover:border-claude-textSecondary/50 hover:bg-claude-hover transition-colors flex items-center gap-1.5"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                      自定义地址
+                    </button>
+                  </div>
+                </div>
                 <div className="flex gap-2 pt-2">
                   <button onClick={handleQuickAdd} className="px-4 py-2 text-[14px] font-medium text-claude-bg bg-claude-text rounded-lg transition-colors hover:opacity-90">
                     添加
