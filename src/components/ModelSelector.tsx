@@ -95,6 +95,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   const [isOpen, setIsOpen] = useState(false);
   const [dropUp, setDropUp] = useState(false);
   const [showMore, setShowMore] = useState(false);
+  const [maxMenuHeight, setMaxMenuHeight] = useState<number | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const currentBase = stripThinking(currentModelString);
@@ -104,7 +105,15 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
 
   // Split models into main tiers and extra
   const mainModels = models.filter(m => m && m.tier !== 'extra');
-  const extraModels = models.filter(m => m && m.tier === 'extra');
+
+  // 这里为了复现这个 issue，我添加了 30 个假模型数组。
+  const extraModels = Array.from({ length: 30 }, (_, i) => ({
+    id: `test-model-${i}`,
+    name: `DeepSeek V3.${i} Preview`,
+    enabled: 1,
+    tier: 'extra' as const
+  }));
+  
   const hasExtra = extraModels.length > 0;
 
   // Current model supports thinking?
@@ -126,7 +135,21 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
     if (!isOpen && containerRef.current) {
       const rect = containerRef.current.getBoundingClientRect();
       const spaceBelow = window.innerHeight - rect.bottom;
-      setDropUp(dropdownPosition === 'top' ? true : (dropdownPosition === 'bottom' ? false : spaceBelow < 280));
+      const spaceAbove = rect.top;
+      const margin = 16; // 預留安全距離，防止貼底/貼頂
+
+      const shouldDropUp = dropdownPosition === 'top' 
+        ? true 
+        : (dropdownPosition === 'bottom' ? false : spaceBelow < 280);
+
+      setDropUp(shouldDropUp);
+
+      // 依向上或向下展開，動態計算最大高度
+      const availableHeight = shouldDropUp 
+        ? spaceAbove - margin 
+        : spaceBelow - margin;
+
+      setMaxMenuHeight(Math.max(120, Math.floor(availableHeight)));
     }
     setIsOpen(!isOpen);
     setShowMore(false);
@@ -194,8 +217,10 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
       </button>
 
       {isOpen && !showMore && (
-        <div className={`absolute ${dropUp ? 'bottom-full mb-2' : 'top-full mt-2'} right-0 w-[260px] bg-claude-input rounded-xl shadow-xl border border-claude-border z-50 overflow-hidden py-1 text-left`}>
-          {/* Main tier models */}
+        <div 
+          style={{ maxHeight: maxMenuHeight ? `${maxMenuHeight}px` : undefined }}
+          className={`absolute ${dropUp ? 'bottom-full mb-2' : 'top-full mt-2'} right-0 w-[260px] bg-claude-input rounded-xl shadow-xl border border-claude-border z-50 overflow-y-auto py-1 text-left`}
+        >
           {mainModels.map(renderModelItem)}
 
           {/* Extended thinking toggle */}
@@ -231,18 +256,24 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
         </div>
       )}
 
-      {/* More models sub-panel */}
       {isOpen && showMore && (
-        <div className={`absolute ${dropUp ? 'bottom-full mb-2' : 'top-full mt-2'} right-0 w-[260px] bg-claude-input rounded-xl shadow-xl border border-claude-border z-50 overflow-hidden py-1 text-left`}>
-          <button
-            onClick={() => setShowMore(false)}
-            className="w-full px-4 py-2 flex items-center gap-2 text-left hover:bg-claude-hover cursor-pointer text-claude-textSecondary"
-          >
-            <ChevronRight size={14} className="rotate-180" />
-            <span className="text-[13px] font-medium">Back</span>
-          </button>
-          <div className="h-[1px] bg-claude-border my-1 mx-4" />
-          {extraModels.map(renderModelItem)}
+        <div 
+          style={{ maxHeight: maxMenuHeight ? `${maxMenuHeight}px` : undefined }}
+          className={`absolute ${dropUp ? 'bottom-full mb-2' : 'top-full mt-2'} right-0 w-[260px] bg-claude-input rounded-xl shadow-xl border border-claude-border z-50 overflow-y-auto py-1 text-left flex flex-col`}
+        >
+          <div className="sticky top-0 bg-claude-input z-10">
+            <button 
+              onClick={() => setShowMore(false)} 
+              className="w-full px-4 py-2 flex items-center gap-2 text-left hover:bg-claude-hover cursor-pointer text-claude-textSecondary"
+            >
+              <ChevronRight size={14} className="rotate-180" />
+              <span className="text-[13px] font-medium">Back</span>
+            </button>
+            <div className="h-[1px] bg-claude-border mx-4" />
+          </div>
+          <div className="flex-1">
+            {extraModels.map(renderModelItem)}
+          </div>
         </div>
       )}
     </div>
