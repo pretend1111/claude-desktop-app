@@ -105,15 +105,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
 
   // Split models into main tiers and extra
   const mainModels = models.filter(m => m && m.tier !== 'extra');
-
-  // 这里为了复现这个 issue，我添加了 30 个假模型数组。
-  const extraModels = Array.from({ length: 30 }, (_, i) => ({
-    id: `test-model-${i}`,
-    name: `DeepSeek V3.${i} Preview`,
-    enabled: 1,
-    tier: 'extra' as const
-  }));
-  
+  const extraModels = models.filter(m => m && m.tier === 'extra');
   const hasExtra = extraModels.length > 0;
 
   // Current model supports thinking?
